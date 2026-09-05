@@ -1,0 +1,29 @@
+plugins {
+    id 'java'
+    // Paperweight allows us to read native Mojang code
+    id 'io.papermc.paperweight.userdev' version '1.7.2'
+}
+
+group = 'com.angryguyy'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+    maven { url = "https://repo.papermc.io/repository/maven-public/" }
+}
+
+dependencies {
+    // Replaces the standard paper-api with the full native server bundle for 1.21.1
+    paperweight.paperDevBundle("1.21.1-R0.1-SNAPSHOT")
+}
+
+def targetJavaVersion = 21
+java {
+    def javaVersion = JavaVersion.toVersion(targetJavaVersion)
+    sourceCompatibility = javaVersion
+    targetCompatibility = javaVersion
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
