@@ -24,19 +24,44 @@ import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientGamePacketListener;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 
+/**
+ * The primary execution task that synchronizes the asynchronous Ray-Tracing results
+ * back to the players on the main server thread (or Folia regional thread).
+ * <p>
+ * Performance: Employs Network Batch Flushing. Instead of flushing the TCP network channel
+ * for every single block update (which severely degrades server TPS and network bandwidth),
+ * it buffers all block updates and pushes them in a single native network flush operation.
+ */
 public final class UpdateBukkitRunnable extends BukkitRunnable implements Consumer<ScheduledTask> {
+
+    // Pre-calculated BlockStates to avoid thousands of NMS method calls
+    private static final BlockState STONE_STATE = Blocks.STONE.defaultBlockState();
+    private static final BlockState DEEPSLATE_STATE = Blocks.DEEPSLATE.defaultBlockState();
+    private static final BlockState NETHERRACK_STATE = Blocks.NETHERRACK.defaultBlockState();
+    private static final BlockState END_STONE_STATE = Blocks.END_STONE.defaultBlockState();
+
     private final MetadataStripper plugin;
     private final Player player;
 
+    /**
+     * Constructs the task for global server execution (standard Bukkit).
+     *
+     * @param plugin the main plugin instance.
+     */
     public UpdateBukkitRunnable(MetadataStripper plugin) {
         this(plugin, null);
     }
 
+    /**
+     * Constructs the task for a specific player (Folia regional threading).
+     *
+     * @param plugin the main plugin instance.
+     * @param player the specific player to update.
+     */
     public UpdateBukkitRunnable(MetadataStripper plugin, Player player) {
         this.plugin = plugin;
         this.player = player;
@@ -44,18 +69,26 @@ public final class UpdateBukkitRunnable extends BukkitRunnable implements Consum
 
     @Override
     public void run() {
-        if (player == null) {
+        if (this.player == null) {
             plugin.getServer().getOnlinePlayers().forEach(this::update);
         } else {
-            update(player);
+            update(this.player);
         }
     }
 
+    /**
+     * Compatibility method for Folia's ScheduledTask interface.
+     */
     @Override
     public void accept(ScheduledTask t) {
         run();
     }
 
+    /**
+     * Processes the queue of Ray-Tracer results and pushes the appropriate packets to the client.
+     *
+     * @param player the player to update.
+     */
     public void update(Player player) {
         PlayerData playerData = plugin.getPlayerData().get(player.getUniqueId());
 
@@ -69,21 +102,32 @@ public final class UpdateBukkitRunnable extends BukkitRunnable implements Consum
             return;
         }
 
+        // Establish network channel
+        Channel channel = getPlayerChannel(player);
+        if (channel == null || !channel.isOpen()) {
+            return;
+        }
+
         ConcurrentMap<LongWrapper, ChunkBlocks> chunks = playerData.getChunks();
         ServerLevel serverLevel = ((CraftWorld) world).getHandle();
         Environment environment = world.getEnvironment();
         Queue<Result> results = playerData.getResults();
-        Result result;
 
+        Result result;
+        boolean requiresFlush = false;
+
+        // Drain the queue
         while ((result = results.poll()) != null) {
             ChunkBlocks chunkBlocks = result.getChunkBlocks();
 
+            // Skip if the chunk has been garbage collected or replaced
             if (chunkBlocks.getChunk() == null || chunks.get(chunkBlocks.getKey()) != chunkBlocks) {
                 continue;
             }
 
             BlockPos block = result.getBlock();
 
+            // Safety verification that the chunk is still active before retrieving native data
             if (!world.isChunkLoaded(block.getX() >> 4, block.getZ() >> 4)) {
                 continue;
             }
@@ -92,41 +136,51 @@ public final class UpdateBukkitRunnable extends BukkitRunnable implements Consum
             BlockEntity blockEntity = null;
 
             if (result.isVisible()) {
+                // Fetch the real, unobfuscated block
                 blockState = serverLevel.getBlockState(block);
-
                 if (blockState.hasBlockEntity()) {
                     blockEntity = serverLevel.getBlockEntity(block);
                 }
             } else if (environment == Environment.NETHER) {
-                blockState = Blocks.NETHERRACK.defaultBlockState();
+                blockState = NETHERRACK_STATE;
             } else if (environment == Environment.THE_END) {
-                blockState = Blocks.END_STONE.defaultBlockState();
+                blockState = END_STONE_STATE;
             } else if (block.getY() < 0) {
-                blockState = Blocks.DEEPSLATE.defaultBlockState();
+                blockState = DEEPSLATE_STATE;
             } else {
-                blockState = Blocks.STONE.defaultBlockState();
+                blockState = STONE_STATE;
             }
 
-            sendPacketImmediately(player, new ClientboundBlockUpdatePacket(block, blockState));
+            // WRITE ONLY: Queues the packet in the channel buffer (CPU cost is practically zero)
+            channel.write(new ClientboundBlockUpdatePacket(block, blockState));
+            requiresFlush = true;
 
+            // If it's a real block with NBT data (like a chest), queue its data packet too
             if (blockEntity != null) {
                 Packet<ClientGamePacketListener> packet = blockEntity.getUpdatePacket();
-
                 if (packet != null) {
-                    sendPacketImmediately(player, packet);
+                    channel.write(packet);
                 }
             }
         }
+
+        // FLUSH ONCE: Push all buffered packets to the network card in a single, ultra-fast operation
+        if (requiresFlush) {
+            channel.flush();
+        }
     }
 
-    private static boolean sendPacketImmediately(Player player, Object packet) {
-        ServerGamePacketListenerImpl connection = ((CraftPlayer) player).getHandle().connection;
-
-        if (connection == null) { return false; }
-        Channel channel = connection.connection.channel;
-
-        if (channel == null || !channel.isOpen()) { return false; }
-        channel.writeAndFlush(packet);
-        return true;
+    /**
+     * Safely retrieves the player's underlying Netty Channel.
+     *
+     * @param player the player.
+     * @return the Channel, or null if unavailable.
+     */
+    private static Channel getPlayerChannel(Player player) {
+        try {
+            return ((CraftPlayer) player).getHandle().connection.connection.channel;
+        } catch (Exception e) {
+            return null;
+        }
     }
 }

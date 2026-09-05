@@ -3,23 +3,50 @@ package com.angryguyy.metadatastripper.util;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 
-// Amanatides, J., & Woo, A. A Fast Voxel Traversal Algorithm for Ray Tracing. http://www.cse.yorku.ca/~amana/research/grid.pdf.
+/**
+ * High-performance, Zero-GC implementation of the Amanatides & Woo "Fast Voxel Traversal Algorithm".
+ * <p>
+ * This class calculates the exact sequence of 3D grid blocks (voxels) intersected by a ray
+ * originating from a start point to an end point (or given a direction and distance).
+ * <p>
+ * <b>Performance:</b> To completely eliminate Garbage Collection overhead during millions of
+ * asynchronous ray-trace calculations, this iterator never instantiates new coordinate arrays.
+ * Instead, it swaps between two internal pre-allocated buffers ({@code ref} and {@code refSwap}).
+ * <p>
+ * <i>Reference: Amanatides, J., & Woo, A. A Fast Voxel Traversal Algorithm for Ray Tracing.</i>
+ */
 @SuppressWarnings("unused")
 public final class BlockIterator implements Iterator<int[]> {
+
+    // Internal coordinate tracking
     private int x;
     private int y;
     private int z;
+
+    // Step directions (-1 or 1) based on the ray's vector
     private int stepX;
     private int stepY;
     private int stepZ;
+
+    // Maximum distance to travel along the ray
     private double tMax;
+
+    // Ray traversal tracking limits
     private double tMaxX;
     private double tMaxY;
     private double tMaxZ;
+
+    // Ray traversal deltas per axis
     private double tDeltaX;
     private double tDeltaY;
     private double tDeltaZ;
-    private int[] ref = new int[3]; // This implementation always returns ref or refSwap to avoid garbage.
+
+    /*
+     * Buffer Swapping Architecture (Zero-GC)
+     * These arrays are recycled constantly. The next() method returns one array
+     * while the calculator immediately prepares the other array for the subsequent step.
+     */
+    private int[] ref = new int[3];
     private int[] refSwap = new int[3];
     private int[] next;
 
@@ -65,9 +92,11 @@ public final class BlockIterator implements Iterator<int[]> {
         double directionZ = endZ - startZ;
         double distance = Math.sqrt(directionX * directionX + directionY * directionY + directionZ * directionZ);
         double fixedDistance = distance == 0. ? Double.NaN : distance;
+
         directionX /= fixedDistance;
         directionY /= fixedDistance;
         directionZ /= fixedDistance;
+
         return initializeNormalized(x, y, z, startX, startY, startZ, directionX, directionY, directionZ, distance);
     }
 
@@ -89,6 +118,7 @@ public final class BlockIterator implements Iterator<int[]> {
         directionX /= length;
         directionY /= length;
         directionZ /= length;
+
         return initializeNormalized(x, y, z, startX, startY, startZ, directionX, directionY, directionZ, Math.abs(distance));
     }
 
@@ -96,33 +126,44 @@ public final class BlockIterator implements Iterator<int[]> {
         return initializeNormalized(floor(startX), floor(startY), floor(startZ), startX, startY, startZ, directionX, directionY, directionZ, Math.abs(distance));
     }
 
+    /**
+     * Initializes the core algorithm parameters for normalized vector traversal.
+     */
     public BlockIterator initializeNormalized(int x, int y, int z, double startX, double startY, double startZ, double directionX, double directionY, double directionZ, double distance) {
         this.x = x;
         this.y = y;
         this.z = z;
-        tMax = distance;
-        stepX = directionX < 0. ? -1 : 1;
-        stepY = directionY < 0. ? -1 : 1;
-        stepZ = directionZ < 0. ? -1 : 1;
+        this.tMax = distance;
+
+        this.stepX = directionX < 0. ? -1 : 1;
+        this.stepY = directionY < 0. ? -1 : 1;
+        this.stepZ = directionZ < 0. ? -1 : 1;
 
         int boundX = x + (stepX > 0 ? 1 : 0);
         int boundY = y + (stepY > 0 ? 1 : 0);
         int boundZ = z + (stepZ > 0 ? 1 : 0);
 
-        tMaxX = directionX == 0. ? Double.POSITIVE_INFINITY : (boundX - startX) / directionX;
-        tMaxY = directionY == 0. ? Double.POSITIVE_INFINITY : (boundY - startY) / directionY;
-        tMaxZ = directionZ == 0. ? Double.POSITIVE_INFINITY : (boundZ - startZ) / directionZ;
+        this.tMaxX = directionX == 0. ? Double.POSITIVE_INFINITY : (boundX - startX) / directionX;
+        this.tMaxY = directionY == 0. ? Double.POSITIVE_INFINITY : (boundY - startY) / directionY;
+        this.tMaxZ = directionZ == 0. ? Double.POSITIVE_INFINITY : (boundZ - startZ) / directionZ;
 
-        tDeltaX = 1. / Math.abs(directionX);
-        tDeltaY = 1. / Math.abs(directionY);
-        tDeltaZ = 1. / Math.abs(directionZ);
-        next = ref;
-        ref[0] = x;
-        ref[1] = y;
-        ref[2] = z;
+        this.tDeltaX = 1. / Math.abs(directionX);
+        this.tDeltaY = 1. / Math.abs(directionY);
+        this.tDeltaZ = 1. / Math.abs(directionZ);
+
+        this.next = ref;
+        this.ref[0] = x;
+        this.ref[1] = y;
+        this.ref[2] = z;
+
         return this;
     }
 
+    /**
+     * Calculates the next voxel intersection point along the ray.
+     *
+     * @return the internal array containing the new coordinates, or null if traversal is complete.
+     */
     public int[] calculateNext() {
         boolean advanced = false;
 
@@ -186,20 +227,34 @@ public final class BlockIterator implements Iterator<int[]> {
         return next != null;
     }
 
+    /**
+     * Retrieves the coordinates of the next intersected block and advances the ray.
+     * <p>
+     * <b>Note:</b> Returns a recycled array. Do not store the returned array permanently,
+     * as its contents will be overwritten on the next call to avoid memory allocation.
+     *
+     * @return a recycled array containing the [x, y, z] block coordinates.
+     */
     @Override
     public int[] next() {
-        int[] next = this.next;
-        if (next == null) {
+        int[] result = this.next;
+        if (result == null) {
             throw new NoSuchElementException();
         }
+
+        // Zero-GC Array Swapping
         int[] temp = ref;
         ref = refSwap;
         refSwap = temp;
         this.next = ref;
+
         calculateNext();
-        return next;
+        return result;
     }
 
+    /**
+     * Fast mathematical floor calculation optimized for ray traversal.
+     */
     private static int floor(double value) {
         int i = (int) value;
         return value < (double) i ? i - 1 : i;

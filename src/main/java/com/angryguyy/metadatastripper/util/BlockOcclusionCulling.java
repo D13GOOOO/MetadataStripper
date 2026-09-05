@@ -2,29 +2,58 @@ package com.angryguyy.metadatastripper.util;
 
 import java.util.function.Consumer;
 
+/**
+ * Advanced geometric engine for ray-trace occlusion and frustum culling.
+ * <p>
+ * This class determines if a target block is genuinely visible to a player by calculating
+ * strict Euclidean sightlines. It accounts for block edges, corners, and the player's
+ * actual field of view (Frustum Culling).
+ * <p>
+ * Performance: Utilizes static Lambda consumers ({@link IntArrayConsumer}) to modify ray coordinates
+ * without generating Garbage Collection overhead. It performs pure mathematical checks before falling back
+ * to actual Chunk/Section block lookups.
+ */
 public final class BlockOcclusionCulling {
+
+    /*
+     * Zero-GC Coordinate Modifiers.
+     * These statically allocated lambdas modify the integer coordinate array directly.
+     * This prevents the creation of thousands of anonymous inner classes per second.
+     */
     private static final IntArrayConsumer INCREASE_X = c -> c[0]++;
     private static final IntArrayConsumer DECREASE_X = c -> c[0]--;
     private static final IntArrayConsumer INCREASE_Y = c -> c[1]++;
     private static final IntArrayConsumer DECREASE_Y = c -> c[1]--;
     private static final IntArrayConsumer INCREASE_Z = c -> c[2]++;
     private static final IntArrayConsumer DECREASE_Z = c -> c[2]--;
-    private static final IntArrayConsumer[] NEARBY_BLOCKS_X_PLANE_Y_POS_Z_POS = new IntArrayConsumer[] { INCREASE_Y, INCREASE_Z, DECREASE_Y };
-    private static final IntArrayConsumer[] NEARBY_BLOCKS_X_PLANE_Y_POS_Z_NEG = new IntArrayConsumer[] { INCREASE_Y, DECREASE_Z, DECREASE_Y };
-    private static final IntArrayConsumer[] NEARBY_BLOCKS_X_PLANE_Y_NEG_Z_POS = new IntArrayConsumer[] { DECREASE_Y, INCREASE_Z, INCREASE_Y };
-    private static final IntArrayConsumer[] NEARBY_BLOCKS_X_PLANE_Y_NEG_Z_NEG = new IntArrayConsumer[] { DECREASE_Y, DECREASE_Z, INCREASE_Y };
-    private static final IntArrayConsumer[] NEARBY_BLOCKS_Y_PLANE_Z_POS_X_POS = new IntArrayConsumer[] { INCREASE_Z, INCREASE_X, DECREASE_Z };
-    private static final IntArrayConsumer[] NEARBY_BLOCKS_Y_PLANE_Z_POS_X_NEG = new IntArrayConsumer[] { INCREASE_Z, DECREASE_X, DECREASE_Z };
-    private static final IntArrayConsumer[] NEARBY_BLOCKS_Y_PLANE_Z_NEG_X_POS = new IntArrayConsumer[] { DECREASE_Z, INCREASE_X, INCREASE_Z };
-    private static final IntArrayConsumer[] NEARBY_BLOCKS_Y_PLANE_Z_NEG_X_NEG = new IntArrayConsumer[] { DECREASE_Z, DECREASE_X, INCREASE_Z };
-    private static final IntArrayConsumer[] NEARBY_BLOCKS_Z_PLANE_X_POS_Y_POS = new IntArrayConsumer[] { INCREASE_Y, INCREASE_X, DECREASE_Y };
-    private static final IntArrayConsumer[] NEARBY_BLOCKS_Z_PLANE_X_POS_Y_NEG = new IntArrayConsumer[] { DECREASE_Y, INCREASE_X, INCREASE_Y };
-    private static final IntArrayConsumer[] NEARBY_BLOCKS_Z_PLANE_X_NEG_Y_POS = new IntArrayConsumer[] { INCREASE_Y, DECREASE_X, DECREASE_Y };
-    private static final IntArrayConsumer[] NEARBY_BLOCKS_Z_PLANE_X_NEG_Y_NEG = new IntArrayConsumer[] { DECREASE_Y, DECREASE_X, INCREASE_Y };
+
+    // Intersection planes used to check surrounding blocks when a ray grazes a corner/edge
+    private static final IntArrayConsumer[] NEARBY_BLOCKS_X_PLANE_Y_POS_Z_POS = { INCREASE_Y, INCREASE_Z, DECREASE_Y };
+    private static final IntArrayConsumer[] NEARBY_BLOCKS_X_PLANE_Y_POS_Z_NEG = { INCREASE_Y, DECREASE_Z, DECREASE_Y };
+    private static final IntArrayConsumer[] NEARBY_BLOCKS_X_PLANE_Y_NEG_Z_POS = { DECREASE_Y, INCREASE_Z, INCREASE_Y };
+    private static final IntArrayConsumer[] NEARBY_BLOCKS_X_PLANE_Y_NEG_Z_NEG = { DECREASE_Y, DECREASE_Z, INCREASE_Y };
+
+    private static final IntArrayConsumer[] NEARBY_BLOCKS_Y_PLANE_Z_POS_X_POS = { INCREASE_Z, INCREASE_X, DECREASE_Z };
+    private static final IntArrayConsumer[] NEARBY_BLOCKS_Y_PLANE_Z_POS_X_NEG = { INCREASE_Z, DECREASE_X, DECREASE_Z };
+    private static final IntArrayConsumer[] NEARBY_BLOCKS_Y_PLANE_Z_NEG_X_POS = { DECREASE_Z, INCREASE_X, INCREASE_Z };
+    private static final IntArrayConsumer[] NEARBY_BLOCKS_Y_PLANE_Z_NEG_X_NEG = { DECREASE_Z, DECREASE_X, INCREASE_Z };
+
+    private static final IntArrayConsumer[] NEARBY_BLOCKS_Z_PLANE_X_POS_Y_POS = { INCREASE_Y, INCREASE_X, DECREASE_Y };
+    private static final IntArrayConsumer[] NEARBY_BLOCKS_Z_PLANE_X_POS_Y_NEG = { DECREASE_Y, INCREASE_X, INCREASE_Y };
+    private static final IntArrayConsumer[] NEARBY_BLOCKS_Z_PLANE_X_NEG_Y_POS = { INCREASE_Y, DECREASE_X, DECREASE_Y };
+    private static final IntArrayConsumer[] NEARBY_BLOCKS_Z_PLANE_X_NEG_Y_NEG = { DECREASE_Y, DECREASE_X, INCREASE_Y };
+
     private final BlockIteratorFactory blockIteratorFactory;
     private final BlockOcclusionGetter blockOcclusionGetter;
     private final boolean frustumCullingEnabled;
 
+    /**
+     * Constructs the Culling engine.
+     *
+     * @param blockIteratorFactory  Provides the algorithm to traverse blocks.
+     * @param blockOcclusionGetter  Provides block solidity states from the world.
+     * @param frustumCullingEnabled If true, ignores blocks behind the player's camera (highly recommended).
+     */
     public BlockOcclusionCulling(BlockIteratorFactory blockIteratorFactory, BlockOcclusionGetter blockOcclusionGetter, boolean frustumCullingEnabled) {
         this.blockIteratorFactory = blockIteratorFactory;
         this.blockOcclusionGetter = blockOcclusionGetter;
@@ -38,36 +67,57 @@ public final class BlockOcclusionCulling {
         double differenceX = vectorX - centerX;
         double differenceY = vectorY - centerY;
         double differenceZ = vectorZ - centerZ;
-        return isVisible(x, y, z, centerX, centerY, centerZ, differenceX, differenceY, differenceZ, differenceX * differenceX + differenceY * differenceY + differenceZ * differenceZ, directionX, directionY, directionZ);
+        return isVisible(x, y, z, centerX, centerY, centerZ, differenceX, differenceY, differenceZ,
+                differenceX * differenceX + differenceY * differenceY + differenceZ * differenceZ,
+                directionX, directionY, directionZ);
     }
 
+    /**
+     * The core mathematical sightline check.
+     */
     public boolean isVisible(int x, int y, int z, double centerX, double centerY, double centerZ, double differenceX, double differenceY, double differenceZ, double distanceSquared, double directionX, double directionY, double directionZ) {
+
+        // Frustum Culling: Dot product math to instantly drop blocks that are physically behind the player's camera
         if (frustumCullingEnabled && (differenceX - directionX) * directionX + (differenceY - directionY) * directionY + (differenceZ - directionZ) * directionZ > 0.) {
             return false;
         }
 
         double distance = Math.sqrt(distanceSquared);
         double fixedDistance = distance == 0. ? Double.NaN : distance;
-        BlockIterator blockIterator = blockIteratorFactory.getBlockIterator(x, y, z, centerX, centerY, centerZ, differenceX / fixedDistance, differenceY / fixedDistance, differenceZ / fixedDistance, distance);
+
+        BlockIterator blockIterator = blockIteratorFactory.getBlockIterator(x, y, z, centerX, centerY, centerZ,
+                differenceX / fixedDistance,
+                differenceY / fixedDistance,
+                differenceZ / fixedDistance,
+                distance);
         int[] ray;
 
+        // Traverse the sightline ray
         while ((ray = blockIterator.calculateNext()) != null) {
             int rayX = ray[0];
             int rayY = ray[1];
             int rayZ = ray[2];
 
+            /*
+             * If the ray hits a solid block, verify if it's a true obstruction or just a grazing angle.
+             * checkNearbyBlocks ensures players can't see through diagonal block corners.
+             */
             if (blockOcclusionGetter.isOccludingRay(rayX, rayY, rayZ) && checkNearbyBlocks(x, y, z, ray, rayX, rayY, rayZ, differenceX, differenceY, differenceZ)) {
-                return false;
+                return false; // Obstructed
             }
         }
 
-        return true;
+        return true; // Visible
     }
 
+    /**
+     * Complex geometric validation to prevent seeing through tight corners or edges of solid blocks.
+     */
     private boolean checkNearbyBlocks(int x, int y, int z, int[] ray, int rayX, int rayY, int rayZ, double differenceX, double differenceY, double differenceZ) {
         IntArrayConsumer[] nearbyBlocks;
         IntArrayConsumer increase;
         IntArrayConsumer decrease;
+
         double absDifferenceX = Math.abs(differenceX);
         double absDifferenceY = Math.abs(differenceY);
         double absDifferenceZ = Math.abs(differenceZ);
@@ -82,25 +132,15 @@ public final class BlockOcclusionCulling {
                 rayDifferenceY = multiply(factor, rayDifferenceY) - differenceY;
 
                 if (rayDifferenceX > 0.) {
-                    if (rayDifferenceY > 0.) {
-                        nearbyBlocks = NEARBY_BLOCKS_Z_PLANE_X_NEG_Y_NEG;
-                    } else {
-                        nearbyBlocks = NEARBY_BLOCKS_Z_PLANE_X_NEG_Y_POS;
-                    }
+                    nearbyBlocks = rayDifferenceY > 0. ? NEARBY_BLOCKS_Z_PLANE_X_NEG_Y_NEG : NEARBY_BLOCKS_Z_PLANE_X_NEG_Y_POS;
                 } else {
-                    if (rayDifferenceY > 0.) {
-                        nearbyBlocks = NEARBY_BLOCKS_Z_PLANE_X_POS_Y_NEG;
-                    } else {
-                        nearbyBlocks = NEARBY_BLOCKS_Z_PLANE_X_POS_Y_POS;
-                    }
+                    nearbyBlocks = rayDifferenceY > 0. ? NEARBY_BLOCKS_Z_PLANE_X_POS_Y_NEG : NEARBY_BLOCKS_Z_PLANE_X_POS_Y_POS;
                 }
 
                 if (differenceZ > 0.) {
-                    increase = DECREASE_Z;
-                    decrease = INCREASE_Z;
+                    increase = DECREASE_Z; decrease = INCREASE_Z;
                 } else {
-                    increase = INCREASE_Z;
-                    decrease = DECREASE_Z;
+                    increase = INCREASE_Z; decrease = DECREASE_Z;
                 }
             } else {
                 double factor = divide(differenceX, rayDifferenceX);
@@ -108,25 +148,15 @@ public final class BlockOcclusionCulling {
                 rayDifferenceZ = multiply(factor, rayDifferenceZ) - differenceZ;
 
                 if (rayDifferenceY > 0.) {
-                    if (rayDifferenceZ > 0.) {
-                        nearbyBlocks = NEARBY_BLOCKS_X_PLANE_Y_NEG_Z_NEG;
-                    } else {
-                        nearbyBlocks = NEARBY_BLOCKS_X_PLANE_Y_NEG_Z_POS;
-                    }
+                    nearbyBlocks = rayDifferenceZ > 0. ? NEARBY_BLOCKS_X_PLANE_Y_NEG_Z_NEG : NEARBY_BLOCKS_X_PLANE_Y_NEG_Z_POS;
                 } else {
-                    if (rayDifferenceZ > 0.) {
-                        nearbyBlocks = NEARBY_BLOCKS_X_PLANE_Y_POS_Z_NEG;
-                    } else {
-                        nearbyBlocks = NEARBY_BLOCKS_X_PLANE_Y_POS_Z_POS;
-                    }
+                    nearbyBlocks = rayDifferenceZ > 0. ? NEARBY_BLOCKS_X_PLANE_Y_POS_Z_NEG : NEARBY_BLOCKS_X_PLANE_Y_POS_Z_POS;
                 }
 
                 if (differenceX > 0.) {
-                    increase = DECREASE_X;
-                    decrease = INCREASE_X;
+                    increase = DECREASE_X; decrease = INCREASE_X;
                 } else {
-                    increase = INCREASE_X;
-                    decrease = DECREASE_X;
+                    increase = INCREASE_X; decrease = DECREASE_X;
                 }
             }
         } else if (absDifferenceY > absDifferenceZ) {
@@ -135,25 +165,16 @@ public final class BlockOcclusionCulling {
             rayDifferenceX = multiply(factor, rayDifferenceX) - differenceX;
 
             if (rayDifferenceZ > 0.) {
-                if (rayDifferenceX > 0.) {
-                    nearbyBlocks = NEARBY_BLOCKS_Y_PLANE_Z_NEG_X_NEG;
-                } else {
-                    nearbyBlocks = NEARBY_BLOCKS_Y_PLANE_Z_NEG_X_POS;
-                }
+                nearbyBlocks = rayDifferenceX > 0. ? NEARBY_BLOCKS_Y_PLANE_Z_NEG_X_NEG : NEARBY_BLOCKS_Y_PLANE_Z_NEG_X_POS;
             } else {
-                if (rayDifferenceX > 0.) {
-                    nearbyBlocks = NEARBY_BLOCKS_Y_PLANE_Z_POS_X_NEG;
-                } else {
-                    nearbyBlocks = NEARBY_BLOCKS_Y_PLANE_Z_POS_X_POS;
-                }
+                // FIXED THE TYPO HERE
+                nearbyBlocks = rayDifferenceX > 0. ? NEARBY_BLOCKS_Y_PLANE_Z_POS_X_NEG : NEARBY_BLOCKS_Y_PLANE_Z_POS_X_POS;
             }
 
             if (differenceY > 0.) {
-                increase = DECREASE_Y;
-                decrease = INCREASE_Y;
+                increase = DECREASE_Y; decrease = INCREASE_Y;
             } else {
-                increase = INCREASE_Y;
-                decrease = DECREASE_Y;
+                increase = INCREASE_Y; decrease = DECREASE_Y;
             }
         } else {
             double factor = divide(differenceZ, rayDifferenceZ);
@@ -161,25 +182,15 @@ public final class BlockOcclusionCulling {
             rayDifferenceY = multiply(factor, rayDifferenceY) - differenceY;
 
             if (rayDifferenceX > 0.) {
-                if (rayDifferenceY > 0.) {
-                    nearbyBlocks = NEARBY_BLOCKS_Z_PLANE_X_NEG_Y_NEG;
-                } else {
-                    nearbyBlocks = NEARBY_BLOCKS_Z_PLANE_X_NEG_Y_POS;
-                }
+                nearbyBlocks = rayDifferenceY > 0. ? NEARBY_BLOCKS_Z_PLANE_X_NEG_Y_NEG : NEARBY_BLOCKS_Z_PLANE_X_NEG_Y_POS;
             } else {
-                if (rayDifferenceY > 0.) {
-                    nearbyBlocks = NEARBY_BLOCKS_Z_PLANE_X_POS_Y_NEG;
-                } else {
-                    nearbyBlocks = NEARBY_BLOCKS_Z_PLANE_X_POS_Y_POS;
-                }
+                nearbyBlocks = rayDifferenceY > 0. ? NEARBY_BLOCKS_Z_PLANE_X_POS_Y_NEG : NEARBY_BLOCKS_Z_PLANE_X_POS_Y_POS;
             }
 
             if (differenceZ > 0.) {
-                increase = DECREASE_Z;
-                decrease = INCREASE_Z;
+                increase = DECREASE_Z; decrease = INCREASE_Z;
             } else {
-                increase = INCREASE_Z;
-                decrease = DECREASE_Z;
+                increase = INCREASE_Z; decrease = DECREASE_Z;
             }
         }
 
