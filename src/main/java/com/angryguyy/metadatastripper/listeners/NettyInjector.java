@@ -5,12 +5,10 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
-import net.minecraft.core.BlockPos;
-import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket;
 import net.minecraft.world.level.block.state.BlockState;
-import org.bukkit.Location;
+import org.bukkit.Bukkit;
 import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -23,13 +21,12 @@ import java.util.logging.Logger;
 
 /**
  * Handles Netty channel pipeline injection to intercept and modify outgoing packets
- * for player connections, preventing storage ESP and stripping block metadata.
+ * specifically for stripping block metadata (growth age) to defeat Sus Chunk Finders.
  */
 public class NettyInjector implements Listener {
 
     private static Field sectionStatesField;
     private static final Logger LOGGER = Logger.getLogger(NettyInjector.class.getName());
-    private static final double MAX_ENTITY_TRACKING_DISTANCE_SQUARED = 8.0 * 8.0;
 
     static {
         try {
@@ -65,7 +62,6 @@ public class NettyInjector implements Listener {
     /**
      * Injects a custom duplex handler into the player's Netty pipeline.
      *
-     * @code
      * @param player the target player
      */
     public void injectPlayer(Player player) {
@@ -75,24 +71,17 @@ public class NettyInjector implements Listener {
         channel.pipeline().addBefore("packet_handler", "MetadataStripper", new ChannelDuplexHandler() {
             @Override
             public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
-                if (msg instanceof ClientboundBlockEntityDataPacket packet) {
-                    BlockPos pos = packet.getPos();
-                    Location playerLoc = player.getLocation();
 
-                    double distanceSquared = Math.pow(playerLoc.getX() - pos.getX(), 2) +
-                            Math.pow(playerLoc.getY() - pos.getY(), 2) +
-                            Math.pow(playerLoc.getZ() - pos.getZ(), 2);
-
-                    if (distanceSquared > MAX_ENTITY_TRACKING_DISTANCE_SQUARED) {
-                        return;
-                    }
-                } else if (msg instanceof ClientboundBlockUpdatePacket packet) {
+                // 1. Single Block Update Stripper
+                if (msg instanceof ClientboundBlockUpdatePacket packet) {
                     BlockState original = packet.getBlockState();
                     BlockState sanitized = BlockStateCache.sanitize(original);
                     if (original != sanitized) {
                         msg = new ClientboundBlockUpdatePacket(packet.getPos(), sanitized);
                     }
-                } else if (msg instanceof ClientboundSectionBlocksUpdatePacket packet) {
+                }
+                // 2. Multi-Block Section Stripper
+                else if (msg instanceof ClientboundSectionBlocksUpdatePacket packet) {
                     if (sectionStatesField != null) {
                         BlockState[] states = (BlockState[]) sectionStatesField.get(packet);
                         boolean modified = false;
