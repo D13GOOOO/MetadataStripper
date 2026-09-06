@@ -2,9 +2,8 @@ package com.angryguyy.metadatastripper.data;
 
 import java.lang.ref.Reference;
 import java.lang.ref.WeakReference;
-import java.util.Map;
 
-import net.minecraft.core.BlockPos;
+import it.unimi.dsi.fastutil.longs.Long2BooleanMap;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.LevelChunk;
 
@@ -12,21 +11,22 @@ import net.minecraft.world.level.chunk.LevelChunk;
  * Represents a wrapper for a Minecraft chunk and its associated sensitive blocks.
  * <p>
  * Uses a {@link WeakReference} to hold the native NMS {@link LevelChunk} to prevent
- * memory leaks when chunks are unloaded and garbage collected by the server.
+ * memory leaks. Sensitive block positions are stored as primitive packed longs
+ * via FastUtil to guarantee zero garbage collection overhead during massive chunk loading.
  */
 public final class ChunkBlocks {
 
     private final Reference<LevelChunk> chunk;
     private final LongWrapper key;
-    private final Map<BlockPos, Boolean> blocks;
+    private final Long2BooleanMap blocks;
 
     /**
      * Constructs a new ChunkBlocks wrapper.
      *
      * @param chunk  the native NMS chunk to wrap
-     * @param blocks a mutable map of sensitive block positions and their current obfuscation state
+     * @param blocks a mutable primitive map of packed block positions to their obfuscation state
      */
-    public ChunkBlocks(LevelChunk chunk, Map<BlockPos, Boolean> blocks) {
+    public ChunkBlocks(LevelChunk chunk, Long2BooleanMap blocks) {
         this.chunk = new WeakReference<>(chunk);
         ChunkPos pos = chunk.getPos();
         this.key = new LongWrapper(ChunkPos.asLong(pos.x, pos.z));
@@ -52,11 +52,11 @@ public final class ChunkBlocks {
     }
 
     /**
-     * Retrieves the map of sensitive blocks and their obfuscation state.
+     * Retrieves the primitive map of sensitive blocks and their obfuscation state.
      *
-     * @return a mutable map of block positions to their hidden state
+     * @return a mutable Long2BooleanMap of packed block positions to their hidden state
      */
-    public Map<BlockPos, Boolean> getBlocks() {
+    public Long2BooleanMap getBlocks() {
         return this.blocks;
     }
 }

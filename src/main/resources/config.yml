@@ -2,15 +2,6 @@
 #     MetadataStripper - Configuration       #
 # ========================================== #
 
-# Engine Mode:
-# 1 = Hide Only (Turns ores into stone/deepslate)
-# 2 = Hallucinations (Creates fake ores to confuse X-Rayers - Recommended!)
-engine-mode: 2
-
-# Percentage of normal stone that will be transformed into fake ores
-# (Ignored if engine-mode is set to 1)
-fake-ore-percentage: 4
-
 # Maximum distance (in blocks) for visual ray-tracing calculation.
 # Lower values (e.g., 48.0) improve TPS, but blocks might "pop in" late.
 ray-trace-distance: 64.0
@@ -41,6 +32,7 @@ sensitive-entities:
 
 # Exact list of (Bukkit) materials to obfuscate/protect.
 sensitive-blocks:
+  # Ores & Valuables
   - DIAMOND_ORE
   - DEEPSLATE_DIAMOND_ORE
   - GOLD_ORE
@@ -60,9 +52,84 @@ sensitive-blocks:
   - NETHER_QUARTZ_ORE
   - NETHER_GOLD_ORE
   - ANCIENT_DEBRIS
+
+  # Containers & Spawners
   - CHEST
   - TRAPPED_CHEST
   - BARREL
   - ENDER_CHEST
   - SPAWNER
+
+  # Trial Chambers (1.21 - Mace Dungeon)
   - TRIAL_SPAWNER
+  - VAULT
+  - HEAVY_CORE
+  - DECORATED_POT
+  - TUFF_BRICKS
+  - POLISHED_TUFF
+  - CHISELED_TUFF
+  - COPPER_BULB
+  - EXPOSED_COPPER_BULB
+  - WEATHERED_COPPER_BULB
+  - OXIDIZED_COPPER_BULB
+  - WAXED_COPPER_BULB
+  - WAXED_EXPOSED_COPPER_BULB
+  - WAXED_WEATHERED_COPPER_BULB
+  - WAXED_OXIDIZED_COPPER_BULB
+  - COPPER_GRATE
+  - EXPOSED_COPPER_GRATE
+  - WEATHERED_COPPER_GRATE
+  - OXIDIZED_COPPER_GRATE
+  - WAXED_COPPER_GRATE
+  - WAXED_EXPOSED_COPPER_GRATE
+  - WAXED_WEATHERED_COPPER_GRATE
+  - WAXED_OXIDIZED_COPPER_GRATE
+
+  # Abandoned Mineshafts
+  - COBWEB
+  - RAIL
+  - POWERED_RAIL
+  - ACTIVATOR_RAIL
+  - DETECTOR_RAIL
+  - OAK_PLANKS
+  - OAK_FENCE
+  - OAK_LOG
+  - DARK_OAK_PLANKS
+  - DARK_OAK_FENCE
+  - DARK_OAK_LOG
+  - CHAIN
+
+  # Strongholds & Classic Dungeons
+  - MOSSY_COBBLESTONE
+  - STONE_BRICKS
+  - MOSSY_STONE_BRICKS
+  - CRACKED_STONE_BRICKS
+  - CHISELED_STONE_BRICKS
+  - END_PORTAL_FRAME
+  - IRON_BARS
+  - IRON_DOOR
+  - BOOKSHELF
+
+  # Amethyst Geodes
+  - AMETHYST_BLOCK
+  - BUDDING_AMETHYST
+  - AMETHYST_CLUSTER
+  - LARGE_AMETHYST_BUD
+  - MEDIUM_AMETHYST_BUD
+  - SMALL_AMETHYST_BUD
+  - CALCITE
+  - SMOOTH_BASALT
+
+  # Deep Dark & Ancient Cities
+  - SCULK
+  - SCULK_VEIN
+  - SCULK_CATALYST
+  - SCULK_SHRIEKER
+  - SCULK_SENSOR
+
+  # Lush Caves & Dripstone
+  - MOSS_BLOCK
+  - MOSS_CARPET
+  - SPORE_BLOSSOM
+  - GLOW_LICHEN
+  - POINTED_DRIPSTONE
