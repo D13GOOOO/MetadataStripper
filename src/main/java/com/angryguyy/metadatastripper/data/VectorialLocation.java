@@ -19,27 +19,16 @@ import org.bukkit.util.Vector;
  */
 public final class VectorialLocation {
 
-    /**
-     * Weakly references the Bukkit World to prevent preventing memory leaks upon world unloading.
-     */
     private final Reference<World> world;
-
-    /**
-     * The pure mathematical vector representing the spatial coordinates (x, y, z).
-     */
     private final Vector vector;
-
-    /**
-     * The normalized mathematical vector representing the viewing direction (yaw, pitch).
-     */
     private final Vector direction;
 
     /**
      * Constructs a new VectorialLocation from its pure mathematical components.
      *
-     * @param world     the Bukkit World (will be weakly referenced).
-     * @param vector    the spatial coordinate vector.
-     * @param direction the viewing direction vector.
+     * @param world     the Bukkit World (will be weakly referenced)
+     * @param vector    the spatial coordinate vector
+     * @param direction the viewing direction vector
      */
     public VectorialLocation(World world, Vector vector, Vector direction) {
         this.world = new WeakReference<>(world);
@@ -50,7 +39,7 @@ public final class VectorialLocation {
     /**
      * Copy constructor that safely clones the vectors to prevent cross-thread mutation issues.
      *
-     * @param location the original {@link VectorialLocation} to clone.
+     * @param location the original {@link VectorialLocation} to clone
      */
     public VectorialLocation(VectorialLocation location) {
         this.world = location.world;
@@ -61,7 +50,7 @@ public final class VectorialLocation {
     /**
      * Extracts the mathematical components from a native Bukkit Location safely.
      *
-     * @param location the native Bukkit {@link Location}.
+     * @param location the native Bukkit {@link Location}
      */
     public VectorialLocation(Location location) {
         this(location.getWorld(), location.toVector(), location.getDirection());
@@ -70,7 +59,7 @@ public final class VectorialLocation {
     /**
      * Retrieves the Bukkit World if it is still loaded in memory.
      *
-     * @return the {@link World}, or null if it has been unloaded and cleared by the GC.
+     * @return the {@link World}, or null if it has been unloaded and cleared by the GC
      */
     public World getWorld() {
         return this.world.get();
@@ -79,7 +68,7 @@ public final class VectorialLocation {
     /**
      * Retrieves the spatial coordinate vector.
      *
-     * @return the coordinate {@link Vector}.
+     * @return the coordinate {@link Vector}
      */
     public Vector getVector() {
         return this.vector;
@@ -88,7 +77,7 @@ public final class VectorialLocation {
     /**
      * Retrieves the normalized viewing direction vector.
      *
-     * @return the direction {@link Vector}.
+     * @return the direction {@link Vector}
      */
     public Vector getDirection() {
         return this.direction;

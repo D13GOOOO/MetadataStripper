@@ -1,18 +1,23 @@
 package com.angryguyy.metadatastripper.tasks;
 
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map.Entry;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentMap;
 import java.util.logging.Level;
 
+import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.entity.Entity;
 import org.bukkit.util.Vector;
 
 import com.angryguyy.metadatastripper.MetadataStripper;
 import com.angryguyy.metadatastripper.data.ChunkBlocks;
+import com.angryguyy.metadatastripper.data.EntityResult;
 import com.angryguyy.metadatastripper.data.LongWrapper;
 import com.angryguyy.metadatastripper.data.MutableLongWrapper;
 import com.angryguyy.metadatastripper.data.PlayerData;
@@ -40,24 +45,22 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
  * Performance: Utilizes zero-allocation math, bitwise operators, and a custom local Section Cache
  * to traverse thousands of blocks per millisecond without lagging the main server thread.
  */
-@SuppressWarnings("all")
 public final class RayTraceCallable implements Callable<Void> {
 
     private static final BlockState AIR = Blocks.AIR.defaultBlockState();
-
-    // Global lookup table indicating if a block state is solid/occluding (stops the ray-trace).
     private static final boolean[] solidGlobal;
 
     static {
         int maxStates = 100000;
-        try { maxStates = Block.BLOCK_STATE_REGISTRY.size(); } catch (Exception ignored) {}
+        try {
+            maxStates = Block.BLOCK_STATE_REGISTRY.size();
+        } catch (Exception ignored) {}
 
         solidGlobal = new boolean[maxStates];
         for (int i = 0; i < maxStates; i++) {
             try {
                 BlockState state = Block.stateById(i);
                 org.bukkit.Material mat = state.createCraftBlockData().getMaterial();
-                // A block is occluding if it's visually solid (ignores spawners, barriers, slime).
                 solidGlobal[i] = mat.isOccluding()
                         && mat != org.bukkit.Material.SPAWNER
                         && mat != org.bukkit.Material.BARRIER
@@ -74,29 +77,30 @@ public final class RayTraceCallable implements Callable<Void> {
     private final BlockOcclusionCulling blockOcclusionCulling;
     private final Collection<ChunkBlocks> chunks;
 
+    private final Set<Integer> knownVisibleEntities = new HashSet<>();
+
     private final double rayTraceDistance;
     private final double rayTraceDistanceSquared;
     private final boolean rehideBlocks;
     private final double rehideDistanceSquared;
 
+    /**
+     * Constructs the asynchronous ray-tracing worker.
+     *
+     * @param plugin     the main plugin instance
+     * @param playerData the target player's asynchronous data profile
+     */
     public RayTraceCallable(MetadataStripper plugin, PlayerData playerData) {
         this.plugin = plugin;
         this.playerData = playerData;
 
-        // Zero-GC Lookup Key
         MutableLongWrapper mutableLongWrapper = new MutableLongWrapper(0L);
-        ConcurrentMap<LongWrapper, ChunkBlocks> chunks = playerData.getChunks();
+        ConcurrentMap<LongWrapper, ChunkBlocks> chunkMap = playerData.getChunks();
 
-        // 100% Safe Bukkit API for world height bounds, prevents NMS mapping crashes
         World bukkitWorld = playerData.getLocations()[0].getWorld();
         final int worldMinSy = bukkitWorld.getMinHeight() >> 4;
         final int worldMaxSy = bukkitWorld.getMaxHeight() >> 4;
 
-        /**
-         * A highly optimized local cache that remembers the last accessed ChunkSection.
-         * This prevents continuous Map lookups when a ray-trace passes through multiple
-         * blocks within the same 16x16x16 chunk section.
-         */
         cachedSectionBlockOcclusionGetter = new CachedSectionBlockOcclusionGetter() {
             private static final boolean UNLOADED_OCCLUDING = true;
             private LevelChunk chunk;
@@ -120,21 +124,30 @@ public final class RayTraceCallable implements Callable<Void> {
                 int sy = y >> 4;
                 int cz = z >> 4;
 
-                // Cache Miss: Ray entered a new Chunk
                 if (this.chunkX != cx || this.chunkZ != cz) {
-                    if (updateCache) { this.chunkX = cx; this.chunkZ = cz; this.sectionY = sy; }
+                    if (updateCache) {
+                        this.chunkX = cx;
+                        this.chunkZ = cz;
+                        this.sectionY = sy;
+                    }
 
                     mutableLongWrapper.setValue(ChunkPos.asLong(cx, cz));
-                    ChunkBlocks chunkBlocks = chunks.get(mutableLongWrapper);
+                    ChunkBlocks chunkBlocks = chunkMap.get(mutableLongWrapper);
 
                     if (chunkBlocks == null) {
-                        if (updateCache) { chunk = null; section = null; }
+                        if (updateCache) {
+                            chunk = null;
+                            section = null;
+                        }
                         return UNLOADED_OCCLUDING;
                     }
 
                     LevelChunk localChunk = chunkBlocks.getChunk();
                     if (localChunk == null) {
-                        if (updateCache) { chunk = null; section = null; }
+                        if (updateCache) {
+                            chunk = null;
+                            section = null;
+                        }
                         return UNLOADED_OCCLUDING;
                     }
                     if (updateCache) chunk = localChunk;
@@ -158,7 +171,6 @@ public final class RayTraceCallable implements Callable<Void> {
                     return solidGlobal[Block.getId(getBlockState(localSection, x, y, z))];
                 }
 
-                // Cache Miss: Ray entered a new Section within the same Chunk
                 if (this.sectionY != sy) {
                     if (updateCache) this.sectionY = sy;
                     if (chunk == null) return UNLOADED_OCCLUDING;
@@ -182,7 +194,6 @@ public final class RayTraceCallable implements Callable<Void> {
                     return solidGlobal[Block.getId(getBlockState(localSection, x, y, z))];
                 }
 
-                // Cache Hit: Ray is traversing the same Section
                 if (section == null) return chunk == null && UNLOADED_OCCLUDING;
                 return solidGlobal[Block.getId(getBlockState(section, x, y, z))];
             }
@@ -191,13 +202,15 @@ public final class RayTraceCallable implements Callable<Void> {
             public void initializeCache(LevelChunk chunk, int chunkX, int sectionY, int chunkZ) {
                 this.chunk = chunk;
                 int sectionIndex = sectionY - worldMinSy;
-                LevelChunkSection[] sections = chunk.getSections();
+                LevelChunkSection[] sections = chunk == null ? new LevelChunkSection[0] : chunk.getSections();
                 if (sectionIndex >= 0 && sectionIndex < sections.length) {
                     section = sections[sectionIndex];
                 } else {
                     section = null;
                 }
-                this.chunkX = chunkX; this.sectionY = sectionY; this.chunkZ = chunkZ;
+                this.chunkX = chunkX;
+                this.sectionY = sectionY;
+                this.chunkZ = chunkZ;
             }
 
             @Override
@@ -214,17 +227,18 @@ public final class RayTraceCallable implements Callable<Void> {
                 true
         );
 
-        this.chunks = chunks.values();
-        rayTraceDistance = 64.0; // The maximum distance in blocks a player can "see" through caves
-        rayTraceDistanceSquared = rayTraceDistance * rayTraceDistance;
-        rehideBlocks = true;     // Enables re-hiding blocks when the player looks away
-        rehideDistanceSquared = 66.0 * 66.0;
+        this.chunks = chunkMap.values();
+        this.rayTraceDistance = plugin.getRayTraceDistance();
+        this.rayTraceDistanceSquared = this.rayTraceDistance * this.rayTraceDistance;
+        this.rehideBlocks = true;
+        this.rehideDistanceSquared = (this.rayTraceDistance + 2.0) * (this.rayTraceDistance + 2.0);
     }
 
     @Override
     public Void call() {
         try {
             rayTrace();
+            rayTraceEntities();
         } catch (Throwable t) {
             plugin.getLogger().log(Level.SEVERE, "An error occured on the RayTrace thread", t);
         }
@@ -236,7 +250,7 @@ public final class RayTraceCallable implements Callable<Void> {
             return;
         }
 
-        ConcurrentMap<LongWrapper, ChunkBlocks> chunks = playerData.getChunks();
+        ConcurrentMap<LongWrapper, ChunkBlocks> chunkMap = playerData.getChunks();
         VectorialLocation[] locations = playerData.getLocations();
         Vector playerVector = locations[0].getVector();
 
@@ -244,7 +258,6 @@ public final class RayTraceCallable implements Callable<Void> {
         double playerY = playerVector.getY();
         double playerZ = playerVector.getZ();
 
-        // Zero-Mutation Math: Calculates Chunk Min/Max boundaries safely without altering the shared Vector object
         int chunkXMin = (int) Math.floor(playerX - rayTraceDistance) >> 4;
         int chunkZMin = (int) Math.floor(playerZ - rayTraceDistance) >> 4;
         int chunkXMax = (int) Math.floor(playerX + rayTraceDistance) >> 4;
@@ -252,13 +265,11 @@ public final class RayTraceCallable implements Callable<Void> {
 
         Queue<Result> results = playerData.getResults();
 
-        // Iterate over all chunks the player currently has loaded
         for (ChunkBlocks chunkBlocks : this.chunks) {
             LevelChunk chunk = chunkBlocks.getChunk();
 
-            // GC cleaned up the chunk, remove it from the map
             if (chunk == null) {
-                chunks.remove(chunkBlocks.getKey(), chunkBlocks);
+                chunkMap.remove(chunkBlocks.getKey(), chunkBlocks);
                 continue;
             }
 
@@ -271,7 +282,6 @@ public final class RayTraceCallable implements Callable<Void> {
 
             Iterator<Entry<BlockPos, Boolean>> iterator = chunkBlocks.getBlocks().entrySet().iterator();
 
-            // Iterate over all obfuscated sensitive blocks in this chunk
             while (iterator.hasNext()) {
                 Entry<BlockPos, Boolean> blockHidden = iterator.next();
                 BlockPos block = blockHidden.getKey();
@@ -296,7 +306,6 @@ public final class RayTraceCallable implements Callable<Void> {
 
                 boolean visible = false;
 
-                // Fire the Ray-Trace to see if the block is visually obstructed
                 if (distanceSquared < rehideDistanceSquared) {
                     int sectionY = y >> 4;
                     for (int i = 0; i < locations.length; i++) {
@@ -316,7 +325,6 @@ public final class RayTraceCallable implements Callable<Void> {
 
                 boolean hidden = blockHidden.getValue();
 
-                // Queue the block update packet to the main thread depending on visibility state
                 if (visible) {
                     if (hidden) {
                         results.add(new Result(chunkBlocks, block, true));
@@ -333,8 +341,80 @@ public final class RayTraceCallable implements Callable<Void> {
             }
         }
 
-        // Clear local cache to release chunk references from the async thread memory
         cachedSectionBlockOcclusionGetter.clearCache();
+    }
+
+    private void rayTraceEntities() {
+        if (blockOcclusionCulling == null) {
+            return;
+        }
+
+        VectorialLocation[] locations = playerData.getLocations();
+        Vector playerVector = locations[0].getVector();
+        World playerWorld = locations[0].getWorld();
+
+        double playerX = playerVector.getX();
+        double playerY = playerVector.getY();
+        double playerZ = playerVector.getZ();
+
+        Queue<EntityResult> entityResults = playerData.getEntityResults();
+
+        for (Entity entity : plugin.getGlobalSensitiveEntities().values()) {
+            int entityId = entity.getEntityId();
+
+            if (!entity.isValid()) {
+                knownVisibleEntities.remove(entityId);
+                continue;
+            }
+
+            if (entity.getWorld() != playerWorld) {
+                continue;
+            }
+
+            Location loc = entity.getLocation();
+            double centerX = loc.getX();
+            double centerY = loc.getY() + 0.5;
+            double centerZ = loc.getZ();
+
+            double diffX = playerX - centerX;
+            double diffY = playerY - centerY;
+            double diffZ = playerZ - centerZ;
+
+            double distanceSquared = diffX * diffX + diffY * diffY + diffZ * diffZ;
+            boolean visible = false;
+
+            if (distanceSquared <= rayTraceDistanceSquared) {
+                int blockX = loc.getBlockX();
+                int blockY = loc.getBlockY();
+                int blockZ = loc.getBlockZ();
+
+                int chunkX = blockX >> 4;
+                int sectionY = blockY >> 4;
+                int chunkZ = blockZ >> 4;
+
+                for (int i = 0; i < locations.length; i++) {
+                    VectorialLocation location = locations[i];
+                    Vector direction = location.getDirection();
+
+                    cachedSectionBlockOcclusionGetter.initializeCache(null, chunkX, sectionY, chunkZ);
+
+                    if (blockOcclusionCulling.isVisible(blockX, blockY, blockZ, centerX, centerY, centerZ, diffX, diffY, diffZ, distanceSquared, direction.getX(), direction.getY(), direction.getZ())) {
+                        visible = true;
+                        break;
+                    }
+                }
+            }
+
+            boolean wasVisible = knownVisibleEntities.contains(entityId);
+            if (visible != wasVisible) {
+                if (visible) {
+                    knownVisibleEntities.add(entityId);
+                } else {
+                    knownVisibleEntities.remove(entityId);
+                }
+                entityResults.add(new EntityResult(entity, visible));
+            }
+        }
     }
 
     private static BlockState getBlockState(LevelChunkSection section, int x, int y, int z) {

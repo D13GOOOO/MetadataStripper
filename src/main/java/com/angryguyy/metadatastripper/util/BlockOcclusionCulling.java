@@ -15,11 +15,6 @@ import java.util.function.Consumer;
  */
 public final class BlockOcclusionCulling {
 
-    /*
-     * Zero-GC Coordinate Modifiers.
-     * These statically allocated lambdas modify the integer coordinate array directly.
-     * This prevents the creation of thousands of anonymous inner classes per second.
-     */
     private static final IntArrayConsumer INCREASE_X = c -> c[0]++;
     private static final IntArrayConsumer DECREASE_X = c -> c[0]--;
     private static final IntArrayConsumer INCREASE_Y = c -> c[1]++;
@@ -27,7 +22,6 @@ public final class BlockOcclusionCulling {
     private static final IntArrayConsumer INCREASE_Z = c -> c[2]++;
     private static final IntArrayConsumer DECREASE_Z = c -> c[2]--;
 
-    // Intersection planes used to check surrounding blocks when a ray grazes a corner/edge
     private static final IntArrayConsumer[] NEARBY_BLOCKS_X_PLANE_Y_POS_Z_POS = { INCREASE_Y, INCREASE_Z, DECREASE_Y };
     private static final IntArrayConsumer[] NEARBY_BLOCKS_X_PLANE_Y_POS_Z_NEG = { INCREASE_Y, DECREASE_Z, DECREASE_Y };
     private static final IntArrayConsumer[] NEARBY_BLOCKS_X_PLANE_Y_NEG_Z_POS = { DECREASE_Y, INCREASE_Z, INCREASE_Y };
@@ -50,9 +44,9 @@ public final class BlockOcclusionCulling {
     /**
      * Constructs the Culling engine.
      *
-     * @param blockIteratorFactory  Provides the algorithm to traverse blocks.
-     * @param blockOcclusionGetter  Provides block solidity states from the world.
-     * @param frustumCullingEnabled If true, ignores blocks behind the player's camera (highly recommended).
+     * @param blockIteratorFactory  Provides the algorithm to traverse blocks
+     * @param blockOcclusionGetter  Provides block solidity states from the world
+     * @param frustumCullingEnabled If true, ignores blocks behind the player's camera
      */
     public BlockOcclusionCulling(BlockIteratorFactory blockIteratorFactory, BlockOcclusionGetter blockOcclusionGetter, boolean frustumCullingEnabled) {
         this.blockIteratorFactory = blockIteratorFactory;
@@ -72,12 +66,7 @@ public final class BlockOcclusionCulling {
                 directionX, directionY, directionZ);
     }
 
-    /**
-     * The core mathematical sightline check.
-     */
     public boolean isVisible(int x, int y, int z, double centerX, double centerY, double centerZ, double differenceX, double differenceY, double differenceZ, double distanceSquared, double directionX, double directionY, double directionZ) {
-
-        // Frustum Culling: Dot product math to instantly drop blocks that are physically behind the player's camera
         if (frustumCullingEnabled && (differenceX - directionX) * directionX + (differenceY - directionY) * directionY + (differenceZ - directionZ) * directionZ > 0.) {
             return false;
         }
@@ -92,27 +81,19 @@ public final class BlockOcclusionCulling {
                 distance);
         int[] ray;
 
-        // Traverse the sightline ray
         while ((ray = blockIterator.calculateNext()) != null) {
             int rayX = ray[0];
             int rayY = ray[1];
             int rayZ = ray[2];
 
-            /*
-             * If the ray hits a solid block, verify if it's a true obstruction or just a grazing angle.
-             * checkNearbyBlocks ensures players can't see through diagonal block corners.
-             */
             if (blockOcclusionGetter.isOccludingRay(rayX, rayY, rayZ) && checkNearbyBlocks(x, y, z, ray, rayX, rayY, rayZ, differenceX, differenceY, differenceZ)) {
-                return false; // Obstructed
+                return false;
             }
         }
 
-        return true; // Visible
+        return true;
     }
 
-    /**
-     * Complex geometric validation to prevent seeing through tight corners or edges of solid blocks.
-     */
     private boolean checkNearbyBlocks(int x, int y, int z, int[] ray, int rayX, int rayY, int rayZ, double differenceX, double differenceY, double differenceZ) {
         IntArrayConsumer[] nearbyBlocks;
         IntArrayConsumer increase;
@@ -167,7 +148,6 @@ public final class BlockOcclusionCulling {
             if (rayDifferenceZ > 0.) {
                 nearbyBlocks = rayDifferenceX > 0. ? NEARBY_BLOCKS_Y_PLANE_Z_NEG_X_NEG : NEARBY_BLOCKS_Y_PLANE_Z_NEG_X_POS;
             } else {
-                // FIXED THE TYPO HERE
                 nearbyBlocks = rayDifferenceX > 0. ? NEARBY_BLOCKS_Y_PLANE_Z_POS_X_NEG : NEARBY_BLOCKS_Y_PLANE_Z_POS_X_POS;
             }
 

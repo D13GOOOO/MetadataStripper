@@ -15,37 +15,24 @@ import java.util.NoSuchElementException;
  * <p>
  * <i>Reference: Amanatides, J., & Woo, A. A Fast Voxel Traversal Algorithm for Ray Tracing.</i>
  */
-@SuppressWarnings("unused")
 public final class BlockIterator implements Iterator<int[]> {
 
-    // Internal coordinate tracking
     private int x;
     private int y;
     private int z;
 
-    // Step directions (-1 or 1) based on the ray's vector
     private int stepX;
     private int stepY;
     private int stepZ;
 
-    // Maximum distance to travel along the ray
     private double tMax;
-
-    // Ray traversal tracking limits
     private double tMaxX;
     private double tMaxY;
     private double tMaxZ;
-
-    // Ray traversal deltas per axis
     private double tDeltaX;
     private double tDeltaY;
     private double tDeltaZ;
 
-    /*
-     * Buffer Swapping Architecture (Zero-GC)
-     * These arrays are recycled constantly. The next() method returns one array
-     * while the calculator immediately prepares the other array for the subsequent step.
-     */
     private int[] ref = new int[3];
     private int[] refSwap = new int[3];
     private int[] next;
@@ -126,9 +113,6 @@ public final class BlockIterator implements Iterator<int[]> {
         return initializeNormalized(floor(startX), floor(startY), floor(startZ), startX, startY, startZ, directionX, directionY, directionZ, Math.abs(distance));
     }
 
-    /**
-     * Initializes the core algorithm parameters for normalized vector traversal.
-     */
     public BlockIterator initializeNormalized(int x, int y, int z, double startX, double startY, double startZ, double directionX, double directionY, double directionZ, double distance) {
         this.x = x;
         this.y = y;
@@ -159,11 +143,6 @@ public final class BlockIterator implements Iterator<int[]> {
         return this;
     }
 
-    /**
-     * Calculates the next voxel intersection point along the ray.
-     *
-     * @return the internal array containing the new coordinates, or null if traversal is complete.
-     */
     public int[] calculateNext() {
         boolean advanced = false;
 
@@ -227,14 +206,6 @@ public final class BlockIterator implements Iterator<int[]> {
         return next != null;
     }
 
-    /**
-     * Retrieves the coordinates of the next intersected block and advances the ray.
-     * <p>
-     * <b>Note:</b> Returns a recycled array. Do not store the returned array permanently,
-     * as its contents will be overwritten on the next call to avoid memory allocation.
-     *
-     * @return a recycled array containing the [x, y, z] block coordinates.
-     */
     @Override
     public int[] next() {
         int[] result = this.next;
@@ -242,7 +213,6 @@ public final class BlockIterator implements Iterator<int[]> {
             throw new NoSuchElementException();
         }
 
-        // Zero-GC Array Swapping
         int[] temp = ref;
         ref = refSwap;
         refSwap = temp;
@@ -252,9 +222,6 @@ public final class BlockIterator implements Iterator<int[]> {
         return result;
     }
 
-    /**
-     * Fast mathematical floor calculation optimized for ray traversal.
-     */
     private static int floor(double value) {
         int i = (int) value;
         return value < (double) i ? i - 1 : i;

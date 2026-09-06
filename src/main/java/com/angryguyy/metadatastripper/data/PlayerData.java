@@ -30,20 +30,21 @@ public final class PlayerData implements Callable<Object> {
     private final ConcurrentMap<LongWrapper, ChunkBlocks> chunks = new ConcurrentHashMap<>();
 
     /**
-     * A lock-free, highly concurrent queue holding the results of the ray-tracing calculations.
-     * The Ray-Tracer acts as the producer, and the Bukkit/Netty thread acts as the consumer.
+     * A lock-free, highly concurrent queue holding the results of the block ray-tracing calculations.
      */
     private final Queue<Result> results = new ConcurrentLinkedQueue<>();
 
     /**
-     * The asynchronous task (e.g., RayTraceCallable) assigned to this player.
+     * A lock-free queue holding the results of entity visibility.
      */
+    private final Queue<EntityResult> entityResults = new ConcurrentLinkedQueue<>();
+
     private Callable<?> callable;
 
     /**
      * Constructs a new PlayerData instance for a specific player.
      *
-     * @param locations the initial vectorial locations (eyes) of the player.
+     * @param locations the initial vectorial locations of the player
      */
     public PlayerData(VectorialLocation[] locations) {
         this.locations = locations;
@@ -65,6 +66,10 @@ public final class PlayerData implements Callable<Object> {
         return this.results;
     }
 
+    public Queue<EntityResult> getEntityResults() {
+        return this.entityResults;
+    }
+
     public Callable<?> getCallable() {
         return this.callable;
     }
@@ -76,12 +81,11 @@ public final class PlayerData implements Callable<Object> {
     /**
      * Executes the assigned callable task asynchronously.
      *
-     * @return the result of the callable execution (usually null for background loops).
-     * @throws Exception if the underlying callable throws an exception.
+     * @return the result of the callable execution
+     * @throws Exception if the underlying callable throws an exception
      */
     @Override
     public Object call() throws Exception {
-        // Safety check to prevent NullPointerException from crashing the ThreadPool worker
         if (this.callable != null) {
             return this.callable.call();
         }

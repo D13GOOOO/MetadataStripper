@@ -1,0 +1,68 @@
+# ========================================== #
+#     MetadataStripper - Configuration       #
+# ========================================== #
+
+# Engine Mode:
+# 1 = Hide Only (Turns ores into stone/deepslate)
+# 2 = Hallucinations (Creates fake ores to confuse X-Rayers - Recommended!)
+engine-mode: 2
+
+# Percentage of normal stone that will be transformed into fake ores
+# (Ignored if engine-mode is set to 1)
+fake-ore-percentage: 4
+
+# Maximum distance (in blocks) for visual ray-tracing calculation.
+# Lower values (e.g., 48.0) improve TPS, but blocks might "pop in" late.
+ray-trace-distance: 64.0
+
+# Packet update frequency (in Ticks). Default: 1 (maximum smoothness)
+update-ticks: 1
+
+# Worlds where the Anti-Xray is completely disabled (e.g., creative worlds or spawn)
+ignored-worlds:
+  - "world_the_end"
+  - "spawn_world"
+
+# Exact list of entities to hide from the client until they are in direct line of sight
+# (Counters Mob ESP & Storage ESP)
+sensitive-entities:
+  - MINECART_CHEST
+  - MINECART_HOPPER
+  - ITEM_FRAME
+  - GLOW_ITEM_FRAME
+  - ARMOR_STAND
+  - VILLAGER
+  - ZOMBIE_VILLAGER
+  - IRON_GOLEM
+  - COW
+  - SHEEP
+  - PIG
+  - HORSE
+
+# Exact list of (Bukkit) materials to obfuscate/protect.
+sensitive-blocks:
+  - DIAMOND_ORE
+  - DEEPSLATE_DIAMOND_ORE
+  - GOLD_ORE
+  - DEEPSLATE_GOLD_ORE
+  - IRON_ORE
+  - DEEPSLATE_IRON_ORE
+  - COPPER_ORE
+  - DEEPSLATE_COPPER_ORE
+  - EMERALD_ORE
+  - DEEPSLATE_EMERALD_ORE
+  - LAPIS_ORE
+  - DEEPSLATE_LAPIS_ORE
+  - COAL_ORE
+  - DEEPSLATE_COAL_ORE
+  - REDSTONE_ORE
+  - DEEPSLATE_REDSTONE_ORE
+  - NETHER_QUARTZ_ORE
+  - NETHER_GOLD_ORE
+  - ANCIENT_DEBRIS
+  - CHEST
+  - TRAPPED_CHEST
+  - BARREL
+  - ENDER_CHEST
+  - SPAWNER
+  - TRIAL_SPAWNER

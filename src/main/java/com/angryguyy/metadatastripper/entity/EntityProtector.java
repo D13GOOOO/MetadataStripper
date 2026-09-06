@@ -14,9 +14,6 @@ import net.minecraft.world.entity.EntityType;
  */
 public final class EntityProtector {
 
-    /**
-     * Private constructor to prevent instantiation of this utility class.
-     */
     private EntityProtector() {
         throw new UnsupportedOperationException("Utility class cannot be instantiated");
     }
@@ -25,17 +22,16 @@ public final class EntityProtector {
      * Determines if the entity being spawned is considered "sensitive" and should be intercepted
      * or hidden from the client.
      *
-     * @param packet the native NMS packet containing the entity spawn data.
-     * @return true if the entity is a sensitive minecart (Chest, Hopper, or TNT), false otherwise.
+     * @param packet the native NMS packet containing the entity spawn data
+     * @return true if the entity is a sensitive minecart or stand, false otherwise
      */
     public static boolean isSensitiveEntity(ClientboundAddEntityPacket packet) {
-        /*
-         * Direct memory reference comparison (O(1)). Extremely fast and GC-free,
-         * perfectly suited for high-frequency Netty pipeline execution.
-         */
         EntityType<?> type = packet.getType();
         return type == EntityType.CHEST_MINECART
                 || type == EntityType.HOPPER_MINECART
-                || type == EntityType.TNT_MINECART;
+                || type == EntityType.TNT_MINECART
+                || type == EntityType.ITEM_FRAME
+                || type == EntityType.GLOW_ITEM_FRAME
+                || type == EntityType.ARMOR_STAND;
     }
 }

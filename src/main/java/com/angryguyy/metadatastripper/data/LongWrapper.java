@@ -10,17 +10,12 @@ package com.angryguyy.metadatastripper.data;
  */
 public class LongWrapper {
 
-    /**
-     * The primitive long value representing packed chunk coordinates.
-     * Declared as protected to allow rapid, direct modification by subclasses
-     * without the overhead of accessor methods.
-     */
     protected long value;
 
     /**
      * Constructs a new LongWrapper.
      *
-     * @param value The primitive long value to wrap.
+     * @param value the primitive long value to wrap
      */
     public LongWrapper(long value) {
         this.value = value;
@@ -29,29 +24,23 @@ public class LongWrapper {
     /**
      * Retrieves the wrapped primitive long value.
      *
-     * @return The underlying long value.
+     * @return the underlying long value
      */
     public final long getValue() {
         return this.value;
     }
 
-    /**
-     * Highly optimized equality check for ultra-fast map lookups.
-     */
     @Override
     public final boolean equals(Object obj) {
         if (this == obj) {
             return true;
         }
-        if (obj instanceof LongWrapper) {
-            return this.value == ((LongWrapper) obj).value;
+        if (obj instanceof LongWrapper other) {
+            return this.value == other.value;
         }
         return false;
     }
 
-    /**
-     * Highly optimized hash code generation for ultra-fast map lookups.
-     */
     @Override
     public final int hashCode() {
         return Long.hashCode(this.value);

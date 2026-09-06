@@ -14,7 +14,7 @@ public final class MutableLongWrapper extends LongWrapper {
     /**
      * Constructs a new MutableLongWrapper.
      *
-     * @param value The initial primitive long value.
+     * @param value the initial primitive long value
      */
     public MutableLongWrapper(long value) {
         super(value);
@@ -23,12 +23,12 @@ public final class MutableLongWrapper extends LongWrapper {
     /**
      * Mutates the internal long value of this wrapper.
      * <p>
-     * <b>Warning:</b> This method alters the object's identity (Hash Code and Equals).
-     * This object should NEVER be mutated while it is actively stored as a key inside a Map,
+     * <b>Warning:</b> This method alters the object's identity.
+     * This object should never be mutated while it is actively stored as a key inside a Map,
      * otherwise the Map will lose the reference. It must only be used as a reusable probe
-     * for {@code Map.get()} lookups.
+     * for map lookups.
      *
-     * @param value The new primitive long value to wrap.
+     * @param value the new primitive long value to wrap
      */
     public void setValue(long value) {
         this.value = value;
