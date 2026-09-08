@@ -17,6 +17,8 @@ import com.angryguyy.metadatastripper.listeners.NettyInjector;
 import com.angryguyy.metadatastripper.listeners.PlayerQuitListener;
 import com.angryguyy.metadatastripper.network.BlockEntityFilter;
 import com.angryguyy.metadatastripper.util.LicenseManager;
+import com.angryguyy.metadatastripper.listeners.BlockUpdateListener;
+import com.angryguyy.metadatastripper.listeners.ProximityRevealer;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -93,6 +95,8 @@ public final class MetadataStripper extends JavaPlugin {
         nettyInjector = new NettyInjector(this);
         pluginManager.registerEvents(nettyInjector, this);
         pluginManager.registerEvents(new PlayerQuitListener(), this);
+        pluginManager.registerEvents(new BlockUpdateListener(), this);
+        pluginManager.registerEvents(new ProximityRevealer(getConfig().getStringList("sensitive-blocks")), this);
 
         PluginCommand msCommand = getCommand("ms");
         if (msCommand != null) {

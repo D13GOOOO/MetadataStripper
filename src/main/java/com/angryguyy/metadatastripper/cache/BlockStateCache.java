@@ -9,19 +9,23 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 /**
  * A highly optimized, Zero-GC cache mechanism for sanitizing native Mojang {@link BlockState} instances.
  * <p>
- * This class intercepts and cleanses sensitive block metadata that could be exploited by unauthorized
- * client-side modifications (e.g., chunk finders, growth-tracking ESPs, and Seed Crackers).
- * It strips variables such as crop maturation stages, waterlogged statuses, block orientations,
- * leaf distances, and snow layer thicknesses which are often used to reverse-engineer world seeds.
+ * This cache intercepts and cleanses sensitive block metadata that could be exploited by unauthorized
+ * client-side modifications, such as chunk finders, growth-tracking ESPs, and world seed crackers.
+ * It systematically strips deterministic variables including crop maturation stages, waterlogged statuses,
+ * leaf distances, and snow layer thicknesses.
  * <p>
  * <b>Algorithmic Complexity:</b>
  * <ul>
- *   <li><b>Initialization:</b> O(N) where N is the total registry size. Executed asynchronously once during server startup.</li>
- *   <li><b>Lookup:</b> O(1) direct array indexing. Guarantees nanosecond-level access times during Netty packet intercept loops.</li>
+ *   <li><b>Initialization:</b> O(N) where N is the total block state registry size. Executed asynchronously once during server startup.</li>
+ *   <li><b>Lookup:</b> O(1) direct array indexing. Guarantees nanosecond-level access times during Netty packet interception loops, ensuring zero main-thread impact.</li>
  * </ul>
  */
 public final class BlockStateCache {
 
+    /**
+     * Pre-computed array mapping native NMS Block IDs to their sanitized equivalents.
+     * Null values within the array indicate that the original block state requires no sanitization.
+     */
     private static final BlockState[] SANITIZED_STATES;
 
     static {
@@ -37,7 +41,7 @@ public final class BlockStateCache {
                 BlockState original = Block.stateById(i);
                 if (original != null) {
                     BlockState sanitized = applySanitization(original);
-                    SANITIZED_STATES[i] = sanitized != original ? sanitized : null;
+                    SANITIZED_STATES[i] = (sanitized != original) ? sanitized : null;
                 }
             } catch (Exception e) {
                 SANITIZED_STATES[i] = null;
@@ -51,10 +55,12 @@ public final class BlockStateCache {
 
     /**
      * Retrieves the sanitized, mathematically flattened equivalent of a given block state.
-     * Evaluates instantaneously using a pre-computed array indexed by the native NMS Block ID.
+     * <p>
+     * Evaluates instantaneously using a pre-computed array indexed by the native NMS Block ID,
+     * bypassing object allocation and garbage collection entirely.
      *
-     * @param state the original, potentially sensitive block state
-     * @return the spoofed block state, or the original state if no sanitization was required
+     * @param state the original, potentially sensitive native block state
+     * @return the normalized block state, or the original state if no sanitization is required
      */
     public static BlockState sanitize(BlockState state) {
         if (state == null) {
@@ -74,78 +80,62 @@ public final class BlockStateCache {
 
     /**
      * Internal mutation engine that systematically strips deterministic metadata properties
-     * from a given block state. This normalizes patterns to neutralize Seed Cracking algorithms.
+     * from a given block state. This normalizes patterns to neutralize reverse-engineering algorithms.
      *
      * @param state the native block state evaluated during initialization
-     * @return a normalized, baseline representation of the state
+     * @return a normalized, baseline representation of the block state
      */
     private static BlockState applySanitization(BlockState state) {
         BlockState spoofed = state;
-        boolean modified = false;
 
         if (spoofed.hasProperty(BlockStateProperties.AGE_1) && spoofed.getValue(BlockStateProperties.AGE_1) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.AGE_1, 0);
-            modified = true;
         }
         if (spoofed.hasProperty(BlockStateProperties.AGE_2) && spoofed.getValue(BlockStateProperties.AGE_2) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.AGE_2, 0);
-            modified = true;
         }
         if (spoofed.hasProperty(BlockStateProperties.AGE_3) && spoofed.getValue(BlockStateProperties.AGE_3) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.AGE_3, 0);
-            modified = true;
         }
         if (spoofed.hasProperty(BlockStateProperties.AGE_5) && spoofed.getValue(BlockStateProperties.AGE_5) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.AGE_5, 0);
-            modified = true;
         }
         if (spoofed.hasProperty(BlockStateProperties.AGE_7) && spoofed.getValue(BlockStateProperties.AGE_7) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.AGE_7, 0);
-            modified = true;
         }
         if (spoofed.hasProperty(BlockStateProperties.AGE_15) && spoofed.getValue(BlockStateProperties.AGE_15) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.AGE_15, 0);
-            modified = true;
         }
         if (spoofed.hasProperty(BlockStateProperties.AGE_25) && spoofed.getValue(BlockStateProperties.AGE_25) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.AGE_25, 0);
-            modified = true;
         }
         if (spoofed.hasProperty(BlockStateProperties.STAGE) && spoofed.getValue(BlockStateProperties.STAGE) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.STAGE, 0);
-            modified = true;
         }
         if (spoofed.hasProperty(BlockStateProperties.BERRIES) && spoofed.getValue(BlockStateProperties.BERRIES)) {
             spoofed = spoofed.setValue(BlockStateProperties.BERRIES, false);
-            modified = true;
         }
         if (spoofed.hasProperty(BlockStateProperties.WATERLOGGED) && spoofed.getValue(BlockStateProperties.WATERLOGGED)) {
             spoofed = spoofed.setValue(BlockStateProperties.WATERLOGGED, false);
-            modified = true;
         }
         if (spoofed.hasProperty(BlockStateProperties.DISTANCE) && spoofed.getValue(BlockStateProperties.DISTANCE) != 1) {
             spoofed = spoofed.setValue(BlockStateProperties.DISTANCE, 1);
-            modified = true;
         }
         if (spoofed.hasProperty(BlockStateProperties.LAYERS) && spoofed.getValue(BlockStateProperties.LAYERS) != 1) {
             spoofed = spoofed.setValue(BlockStateProperties.LAYERS, 1);
-            modified = true;
         }
         if (spoofed.hasProperty(BlockStateProperties.MOISTURE) && spoofed.getValue(BlockStateProperties.MOISTURE) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.MOISTURE, 0);
-            modified = true;
         }
         if (spoofed.hasProperty(BlockStateProperties.PICKLES) && spoofed.getValue(BlockStateProperties.PICKLES) != 1) {
             spoofed = spoofed.setValue(BlockStateProperties.PICKLES, 1);
-            modified = true;
         }
         if (spoofed.getBlock() == Blocks.DEEPSLATE && spoofed.hasProperty(BlockStateProperties.AXIS)) {
             if (spoofed.getValue(BlockStateProperties.AXIS) != Direction.Axis.Y) {
                 spoofed = spoofed.setValue(BlockStateProperties.AXIS, Direction.Axis.Y);
-                modified = true;
             }
         }
 
-        return modified ? spoofed : state;
+        return spoofed;
     }
 }

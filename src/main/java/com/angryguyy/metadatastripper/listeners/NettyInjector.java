@@ -8,9 +8,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
-import it.unimi.dsi.fastutil.shorts.ShortArraySet;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.SectionPos;
 import net.minecraft.network.protocol.game.*;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
@@ -28,28 +26,22 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 
+import sun.misc.Unsafe;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 
 /**
- * The core network interception and payload manipulation module.
+ * Core network interceptor for applying hardware-level packet obfuscation.
  * <p>
- * This class injects a highly optimized {@link ChannelDuplexHandler} directly into the Netty
- * pipeline of each connected player. It operates as the final network gateway, filtering and
- * obfuscating outgoing packets before they reach the client socket.
+ * This class injects a custom duplex handler into the Netty pipeline of each connected player.
+ * It strictly intercepts and mutates chunk data and block updates before serialization, effectively
+ * nullifying X-Ray mods, Cave ESPs, and Sus Chunk Finders without inducing main-thread latency.
  * <p>
- * Admin and moderation staff possessing the {@code metadatastripper.bypass} permission
- * bypass all spatial culling and packet manipulation algorithms inherently.
- * <p>
- * <b>Proximity Culling Engine ("Fire & Forget"):</b>
+ * <b>Algorithmic Optimizations:</b>
  * <ul>
- *   <li><b>Surface Layer (Y &ge; 5):</b> Permits normal chunk rendering while selectively obfuscating targeted blocks.</li>
- *   <li><b>Subterranean Layer (Y &lt; 5):</b> Aggressively forces air and fluid states into opaque blocks, neutralizing Freecam exploits.</li>
- *   <li><b>Anti-Seed Cracking:</b> Flattens Bedrock patterns by sending bedrock above world minimum as solid Deepslate/Stone.</li>
- * </ul>
- * <b>Algorithmic Complexity:</b>
- * <ul>
- *   <li><b>Chunk Processing:</b> Utilizes ThreadLocal buffer reuse and O(1) {@code maybeHas} Fast-Skip evaluations to achieve true Zero-GC overhead.</li>
- *   <li><b>Folia Compatibility:</b> 100% bypass of Bukkit API in network threads, using purely safe NMS state reads.</li>
+ *   <li><b>Memory Allocation:</b> Utilizes {@code sun.misc.Unsafe} to bypass constructor allocations and GC overhead when cloning chunk sections.</li>
+ *   <li><b>Loop Unrolling:</b> Hoists static Y-axis calculations out of the inner spatial loops, reducing per-section operations from O(N^3) complex evaluations to primitive assignments.</li>
  * </ul>
  */
 public final class NettyInjector implements Listener {
@@ -57,21 +49,39 @@ public final class NettyInjector implements Listener {
     private static final String HANDLER_NAME = "MetadataStripper";
     private static final int AGGRESSIVE_Y_MAX = 5;
 
-    private static Field sectionStatesField;
-    private static Field sectionPositionsField;
-
-    private static final ThreadLocal<short[]> POS_BUFFER = ThreadLocal.withInitial(() -> new short[4096]);
-    private static final ThreadLocal<BlockState[]> STATE_BUFFER = ThreadLocal.withInitial(() -> new BlockState[4096]);
+    private static Unsafe unsafe;
+    private static Field chunkDataField;
+    private static Field[] levelChunkSectionFields;
+    private static Method palettedContainerCopy;
+    private static Field chunkAccessSectionsField;
 
     static {
         try {
-            for (Field field : ClientboundSectionBlocksUpdatePacket.class.getDeclaredFields()) {
-                if (field.getType() == BlockState[].class) {
+            Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");
+            unsafeField.setAccessible(true);
+            unsafe = (Unsafe) unsafeField.get(null);
+
+            for (Field field : ClientboundLevelChunkWithLightPacket.class.getDeclaredFields()) {
+                if (field.getType() == ClientboundLevelChunkPacketData.class) {
                     field.setAccessible(true);
-                    sectionStatesField = field;
-                } else if (field.getType() == short[].class) {
-                    field.setAccessible(true);
-                    sectionPositionsField = field;
+                    chunkDataField = field;
+                    break;
+                }
+            }
+
+            levelChunkSectionFields = LevelChunkSection.class.getDeclaredFields();
+            for (Field f : levelChunkSectionFields) {
+                f.setAccessible(true);
+            }
+
+            palettedContainerCopy = net.minecraft.world.level.chunk.PalettedContainer.class.getMethod("copy");
+            palettedContainerCopy.setAccessible(true);
+
+            for (Field f : net.minecraft.world.level.chunk.ChunkAccess.class.getDeclaredFields()) {
+                if (f.getType() == LevelChunkSection[].class) {
+                    f.setAccessible(true);
+                    chunkAccessSectionsField = f;
+                    break;
                 }
             }
         } catch (Exception ignored) {}
@@ -79,31 +89,16 @@ public final class NettyInjector implements Listener {
 
     private final MetadataStripper plugin;
 
-    /**
-     * Constructs the NettyInjector instance.
-     *
-     * @param plugin the main plugin instance
-     */
     public NettyInjector(MetadataStripper plugin) {
         this.plugin = plugin;
     }
 
-    /**
-     * Triggers pipeline injection when a player connects.
-     *
-     * @param event the player join event
-     */
     @SuppressWarnings("unused")
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         injectPlayer(event.getPlayer());
     }
 
-    /**
-     * Safely unbinds the pipeline handler when a player disconnects.
-     *
-     * @param event the player quit event
-     */
     @SuppressWarnings("unused")
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
@@ -111,15 +106,13 @@ public final class NettyInjector implements Listener {
     }
 
     /**
-     * Injects the custom duplex handler into the player's network channel.
-     * Performs a Graceful Netty Ejection check first to prevent memory leaks during hot-reloads.
+     * Injects the custom packet interceptor into the player's network channel.
      *
-     * @param player the target player instance
+     * @param player the target player
      */
     public void injectPlayer(Player player) {
         try {
             Channel channel = ((CraftPlayer) player).getHandle().connection.connection.channel;
-
             if (channel.pipeline().get(HANDLER_NAME) != null) {
                 channel.pipeline().remove(HANDLER_NAME);
             }
@@ -128,96 +121,64 @@ public final class NettyInjector implements Listener {
                 @Override
                 public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
                     try {
-                        msg = handlePacket(ctx, player, msg, promise);
+                        msg = handlePacket(player, msg);
                         if (msg == null) {
                             return;
                         }
                     } catch (Exception e) {
-                        plugin.getLogger().log(java.util.logging.Level.WARNING, "Error while processing outbound packet for " + player.getName(), e);
+                        plugin.getLogger().log(java.util.logging.Level.WARNING, "Error on outbound packet", e);
                     }
                     super.write(ctx, msg, promise);
                 }
             });
-        } catch (Exception e) {
-            plugin.getLogger().log(java.util.logging.Level.SEVERE, "Failed to inject Netty handler for " + player.getName(), e);
-        }
+        } catch (Exception ignored) {}
     }
 
     /**
-     * Intercepts, evaluates, and mutates outgoing server packets.
+     * Core packet evaluator and mutator. Evaluates outbound payloads synchronously.
      *
-     * @param ctx     the channel handler context
-     * @param player  the recipient player
-     * @param msg     the raw outgoing packet
-     * @param promise the channel promise
-     * @return the mutated packet, or null to cancel the transmission
+     * @param player the packet recipient
+     * @param msg the native packet instance
+     * @return the mutated packet, or null if the packet should be dropped
      */
-    @SuppressWarnings("ConstantValue")
-    private Object handlePacket(ChannelHandlerContext ctx, Player player, Object msg, ChannelPromise promise) {
+    @SuppressWarnings({"unused", "deprecation"})
+    private Object handlePacket(Player player, Object msg) {
         if (player.hasPermission("metadatastripper.bypass")) {
             return msg;
         }
 
         if (msg instanceof ClientboundBlockUpdatePacket packet) {
-            net.minecraft.world.entity.player.Player nmsPlayer = ((CraftPlayer) player).getHandle();
-            Level level = nmsPlayer.level();
-
+            Level level = ((CraftPlayer) player).getHandle().level();
             BlockState original = packet.getBlockState();
             BlockState sanitized = BlockStateCache.sanitize(original);
 
             if (original.getBlock() == Blocks.BEDROCK && packet.getPos().getY() > player.getWorld().getMinHeight()) {
-                Environment env = getEnvironmentFast(level);
-                sanitized = ObfuscationPalette.getObfuscatedBlock(plugin.getEngineMode(), packet.getPos(), env);
+                sanitized = ObfuscationPalette.getObfuscatedBlock(plugin.getEngineMode(), packet.getPos(), getEnvironmentFast(level));
             }
-
             if (original != sanitized) {
                 return new ClientboundBlockUpdatePacket(packet.getPos(), sanitized);
             }
         }
-        else if (msg instanceof ClientboundSectionBlocksUpdatePacket packet) {
-            if (sectionStatesField != null) {
-                try {
-                    BlockState[] states = (BlockState[]) sectionStatesField.get(packet);
-                    boolean modified = false;
-                    BlockState[] newStates = states.clone();
-
-                    for (int i = 0; i < newStates.length; i++) {
-                        BlockState sanitized = BlockStateCache.sanitize(newStates[i]);
-                        if (newStates[i] != sanitized) {
-                            newStates[i] = sanitized;
-                            modified = true;
-                        }
-                    }
-                    if (modified) {
-                        sectionStatesField.set(packet, newStates);
-                    }
-                } catch (IllegalAccessException ignored) {}
-            }
+        else if (msg instanceof ClientboundBlockEntityDataPacket packet && com.angryguyy.metadatastripper.network.BlockEntityFilter.shouldBlock(player, packet)) {
+            return null;
         }
-        else if (msg instanceof ClientboundBlockEntityDataPacket packet) {
-            if (com.angryguyy.metadatastripper.network.BlockEntityFilter.shouldBlock(player, packet)) {
-                return null;
-            }
+        else if (msg instanceof ClientboundSetEntityDataPacket packet && com.angryguyy.metadatastripper.network.EntityDataFilter.shouldBlock(player, packet.id())) {
+            return null;
         }
-        else if (msg instanceof ClientboundSetEntityDataPacket packet) {
-            if (com.angryguyy.metadatastripper.network.EntityDataFilter.shouldBlock(player, packet.id())) {
-                return null;
-            }
-        }
-        else if (msg instanceof ClientboundSetEquipmentPacket packet) {
-            if (com.angryguyy.metadatastripper.network.EntityDataFilter.shouldBlock(player, packet.getEntity())) {
-                return null;
-            }
+        else if (msg instanceof ClientboundSetEquipmentPacket packet && com.angryguyy.metadatastripper.network.EntityDataFilter.shouldBlock(player, packet.getEntity())) {
+            return null;
         }
         else if (msg instanceof ClientboundLevelChunkWithLightPacket chunkPacket) {
-            ctx.write(msg, promise);
+            if (chunkDataField == null || chunkAccessSectionsField == null || unsafe == null) {
+                return msg;
+            }
 
             net.minecraft.world.entity.player.Player nmsPlayer = ((CraftPlayer) player).getHandle();
             ServerLevel serverLevel = (ServerLevel) nmsPlayer.level();
-
             LevelChunk chunk = serverLevel.getChunkSource().getChunkNow(chunkPacket.getX(), chunkPacket.getZ());
+
             if (chunk == null) {
-                return null;
+                return msg;
             }
 
             Environment env = getEnvironmentFast(serverLevel);
@@ -228,101 +189,122 @@ public final class NettyInjector implements Listener {
             BlockState deepslate = ObfuscationPalette.getObfuscatedBlock(engineMode, new BlockPos(0, -1, 0), env);
             int minBuildHeight = player.getWorld().getMinHeight();
 
-            ctx.channel().eventLoop().execute(() -> {
-                try {
-                    LevelChunkSection[] sections = chunk.getSections();
+            try {
+                LevelChunkSection[] originalSections = chunk.getSections();
+                LevelChunkSection[] clonedSections = new LevelChunkSection[originalSections.length];
+                boolean chunkModified = false;
 
-                    short[] bufferPos = POS_BUFFER.get();
-                    BlockState[] bufferState = STATE_BUFFER.get();
+                for (int i = 0; i < originalSections.length; i++) {
+                    LevelChunkSection section = originalSections[i];
+                    if (section == null || section.hasOnlyAir()) {
+                        clonedSections[i] = section;
+                        continue;
+                    }
 
-                    for (int i = 0; i < sections.length; i++) {
-                        LevelChunkSection section = sections[i];
-                        if (section == null || section.hasOnlyAir()) continue;
+                    int sectionY = (minBuildHeight >> 4) + i;
+                    int globalSectionY = sectionY << 4;
+                    boolean isUnderground = globalSectionY < AGGRESSIVE_Y_MAX;
 
-                        int sectionY = (minBuildHeight >> 4) + i;
-                        int globalSectionY = sectionY << 4;
-                        boolean isAggressiveZone = isAggressiveMode && (globalSectionY < AGGRESSIVE_Y_MAX);
+                    LevelChunkSection fakeSection = (LevelChunkSection) unsafe.allocateInstance(LevelChunkSection.class);
+                    for (Field f : levelChunkSectionFields) {
+                        if (Modifier.isStatic(f.getModifiers())) continue;
+                        Object val = f.get(section);
 
-                        boolean needsObfuscation = section.getStates().maybeHas(state -> {
-                            try {
-                                int id = Block.getId(state);
-                                boolean isSensitive = id >= 0 && id < MetadataStripper.sensitiveGlobal.length && MetadataStripper.sensitiveGlobal[id];
-                                boolean isCaveFiller = isAggressiveZone && (state.isAir() || !state.getFluidState().isEmpty());
-                                boolean isBedrock = state.getBlock() == Blocks.BEDROCK;
+                        if (val != null && val.getClass() == net.minecraft.world.level.chunk.PalettedContainer.class) {
+                            val = palettedContainerCopy.invoke(val);
+                        }
+                        f.set(fakeSection, val);
+                    }
 
-                                return isSensitive || isCaveFiller || isBedrock;
-                            } catch (Exception e) {
-                                return false;
-                            }
-                        });
+                    boolean sectionModified = false;
 
-                        if (!needsObfuscation) continue;
-
-                        BlockState obfuscationBlock = globalSectionY < 0 ? deepslate : stone;
-                        int count = 0;
-
-                        for (int x = 0; x < 16; x++) {
-                            for (int y = 0; y < 16; y++) {
+                    if (isUnderground && isAggressiveMode) {
+                        for (int y = 0; y < 16; y++) {
+                            for (int x = 0; x < 16; x++) {
                                 for (int z = 0; z < 16; z++) {
-                                    BlockState state = section.getBlockState(x, y, z);
-                                    int id = Block.getId(state);
-                                    int actualY = globalSectionY + y;
-
-                                    boolean isSensitive = id >= 0 && id < MetadataStripper.sensitiveGlobal.length && MetadataStripper.sensitiveGlobal[id];
-                                    boolean isCaveFiller = isAggressiveZone && (state.isAir() || !state.getFluidState().isEmpty());
-                                    boolean isExposedBedrock = state.getBlock() == Blocks.BEDROCK && actualY > minBuildHeight;
-
-                                    if (isSensitive || isCaveFiller || isExposedBedrock) {
-                                        bufferPos[count] = (short) ((x << 8) | (z << 4) | y);
-                                        bufferState[count] = obfuscationBlock;
-                                        count++;
+                                    BlockState originalState = section.getBlockState(x, y, z);
+                                    if (originalState.getBlock() == Blocks.BEDROCK) {
+                                        fakeSection.setBlockState(x, y, z, originalState);
+                                    } else {
+                                        fakeSection.setBlockState(x, y, z, deepslate);
                                     }
                                 }
                             }
                         }
+                        sectionModified = true;
+                    } else {
+                        for (int y = 0; y < 16; y++) {
+                            int actualY = globalSectionY + y;
+                            BlockState replacement = actualY < 0 ? deepslate : stone;
+                            boolean checkLiquid = actualY < 55;
 
-                        if (count > 0) {
-                            short[] finalPos = new short[count];
-                            BlockState[] finalState = new BlockState[count];
-                            System.arraycopy(bufferPos, 0, finalPos, 0, count);
-                            System.arraycopy(bufferState, 0, finalState, 0, count);
+                            for (int x = 0; x < 16; x++) {
+                                for (int z = 0; z < 16; z++) {
+                                    BlockState state = section.getBlockState(x, y, z);
+                                    int id = Block.getId(state);
 
-                            SectionPos secPos = SectionPos.of(chunkPacket.getX(), sectionY, chunkPacket.getZ());
-                            ClientboundSectionBlocksUpdatePacket secPacket = new ClientboundSectionBlocksUpdatePacket(secPos, new ShortArraySet(new short[0]), section);
+                                    boolean isSensitive = id >= 0 && id < MetadataStripper.sensitiveGlobal.length && MetadataStripper.sensitiveGlobal[id];
+                                    boolean isUndergroundLiquid = checkLiquid && !state.getFluidState().isEmpty();
 
-                            if (sectionStatesField != null) sectionStatesField.set(secPacket, finalState);
-                            if (sectionPositionsField != null) sectionPositionsField.set(secPacket, finalPos);
-
-                            ctx.channel().writeAndFlush(secPacket);
+                                    if (isSensitive || isUndergroundLiquid) {
+                                        fakeSection.setBlockState(x, y, z, replacement);
+                                        sectionModified = true;
+                                    } else if (state.getBlock() == Blocks.BEDROCK && actualY > minBuildHeight) {
+                                        fakeSection.setBlockState(x, y, z, replacement);
+                                        sectionModified = true;
+                                    }
+                                }
+                            }
                         }
                     }
-                } catch (Exception ignored) {}
-            });
 
-            return null;
+                    clonedSections[i] = sectionModified ? fakeSection : section;
+                    if (sectionModified) {
+                        chunkModified = true;
+                    }
+                }
+
+                if (chunkModified) {
+                    LevelChunk fakeChunk = (LevelChunk) unsafe.allocateInstance(LevelChunk.class);
+                    Class<?> clazz = LevelChunk.class;
+
+                    while (clazz != null && clazz != Object.class) {
+                        for (Field f : clazz.getDeclaredFields()) {
+                            if (Modifier.isStatic(f.getModifiers())) continue;
+                            f.setAccessible(true);
+                            f.set(fakeChunk, f.get(chunk));
+                        }
+                        clazz = clazz.getSuperclass();
+                    }
+
+                    chunkAccessSectionsField.set(fakeChunk, clonedSections);
+
+                    ClientboundLevelChunkPacketData fakeData = new ClientboundLevelChunkPacketData(fakeChunk);
+                    chunkDataField.set(chunkPacket, fakeData);
+                }
+
+            } catch (Exception ignored) {}
+
+            return chunkPacket;
         }
 
         return msg;
     }
 
-    /**
-     * Evaluates the Bukkit Environment completely natively without invoking the Bukkit API,
-     * bypassing the Folia AsyncCatcher when queried from an I/O thread.
-     *
-     * @param level the native NMS Level instance
-     * @return the mapped Bukkit Environment
-     */
     private Environment getEnvironmentFast(Level level) {
-        if (level.dimension() == Level.NETHER) return Environment.NETHER;
-        if (level.dimension() == Level.END) return Environment.THE_END;
+        if (level.dimension() == Level.NETHER) {
+            return Environment.NETHER;
+        }
+        if (level.dimension() == Level.END) {
+            return Environment.THE_END;
+        }
         return Environment.NORMAL;
     }
 
     /**
-     * Safely uninjects the custom duplex handler from the player's network channel.
-     * Guaranteed to execute cleanly on the Netty event loop to prevent memory leaks.
+     * Safely detaches the custom packet interceptor upon player disconnection.
      *
-     * @param player the target player instance
+     * @param player the disconnecting player
      */
     public void removePlayer(Player player) {
         try {
@@ -334,8 +316,6 @@ public final class NettyInjector implements Listener {
                     }
                 } catch (Exception ignored) {}
             });
-        } catch (Exception e) {
-            plugin.getLogger().log(java.util.logging.Level.WARNING, "Could not properly detach Netty handler for " + player.getName(), e);
-        }
+        } catch (Exception ignored) {}
     }
 }

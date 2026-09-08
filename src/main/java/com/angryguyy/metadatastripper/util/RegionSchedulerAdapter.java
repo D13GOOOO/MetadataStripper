@@ -45,7 +45,6 @@ public final class RegionSchedulerAdapter {
      */
     public static void executeForEntity(Plugin plugin, Entity entity, Runnable task) {
         if (IS_FOLIA) {
-            // Passiamo il Runnable direttamente per evitare l'allocazione in memoria di una Lambda (Zero-GC)
             entity.getScheduler().execute(plugin, task, null, 1L);
         } else {
             Bukkit.getScheduler().runTask(plugin, task);
