@@ -2,13 +2,6 @@
 #     MetadataStripper - Configuration       #
 # ========================================== #
 
-# Maximum distance (in blocks) for visual ray-tracing calculation.
-# Lower values (e.g., 48.0) improve TPS, but blocks might "pop in" late.
-ray-trace-distance: 64.0
-
-# Packet update frequency (in Ticks). Default: 1 (maximum smoothness)
-update-ticks: 1
-
 # Worlds where the Anti-Xray is completely disabled (e.g., creative worlds or spawn)
 ignored-worlds:
   - "world_the_end"
@@ -65,9 +58,40 @@ sensitive-blocks:
   - VAULT
   - HEAVY_CORE
   - DECORATED_POT
+  - TUFF
+  - TUFF_SLAB
+  - TUFF_STAIRS
+  - TUFF_WALL
   - TUFF_BRICKS
+  - TUFF_BRICK_SLAB
+  - TUFF_BRICK_STAIRS
+  - TUFF_BRICK_WALL
   - POLISHED_TUFF
+  - POLISHED_TUFF_SLAB
+  - POLISHED_TUFF_STAIRS
+  - POLISHED_TUFF_WALL
   - CHISELED_TUFF
+  - CHISELED_TUFF_BRICKS
+  - COPPER_BLOCK
+  - EXPOSED_COPPER
+  - WEATHERED_COPPER
+  - OXIDIZED_COPPER
+  - CUT_COPPER
+  - EXPOSED_CUT_COPPER
+  - WEATHERED_CUT_COPPER
+  - OXIDIZED_CUT_COPPER
+  - CHISELED_COPPER
+  - EXPOSED_CHISELED_COPPER
+  - WEATHERED_CHISELED_COPPER
+  - OXIDIZED_CHISELED_COPPER
+  - COPPER_DOOR
+  - EXPOSED_COPPER_DOOR
+  - WEATHERED_COPPER_DOOR
+  - OXIDIZED_COPPER_DOOR
+  - COPPER_TRAPDOOR
+  - EXPOSED_COPPER_TRAPDOOR
+  - WEATHERED_COPPER_TRAPDOOR
+  - OXIDIZED_COPPER_TRAPDOOR
   - COPPER_BULB
   - EXPOSED_COPPER_BULB
   - WEATHERED_COPPER_BULB
@@ -85,18 +109,12 @@ sensitive-blocks:
   - WAXED_WEATHERED_COPPER_GRATE
   - WAXED_OXIDIZED_COPPER_GRATE
 
-  # Abandoned Mineshafts
+  # Abandoned Mineshafts (No Wood)
   - COBWEB
   - RAIL
   - POWERED_RAIL
   - ACTIVATOR_RAIL
   - DETECTOR_RAIL
-  - OAK_PLANKS
-  - OAK_FENCE
-  - OAK_LOG
-  - DARK_OAK_PLANKS
-  - DARK_OAK_FENCE
-  - DARK_OAK_LOG
   - CHAIN
 
   # Strongholds & Classic Dungeons
