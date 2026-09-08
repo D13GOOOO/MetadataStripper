@@ -119,3 +119,25 @@ sensitive-blocks:
   - VAULT
   - HEAVY_CORE
   - DECORATED_POT
+```
+
+## Commands and Permissions
+
+### Commands
+- `/ms` - Displays real-time engine telemetry, including destroyed NBT packets, blocked entity data payloads, and total culled entities.
+- `/ms reload` - Triggers a live hot-reload of configuration settings and internal lookup tables without uninjecting connected clients.
+
+### Permissions
+- `metadatastripper.admin` - Grants access to administrative commands (`/ms` and `/ms reload`) and enables receipt of automated silent exploit profiler alerts.
+- `metadatastripper.bypass` - Completely bypasses all Netty packet obfuscation, spatial culling, and entity visibility restrictions for trusted staff members.
+
+---
+
+## Technical Specifications
+
+| Component | Execution Context | Algorithmic Complexity | Memory Allocation |
+| :--- | :--- | :--- | :--- |
+| **Block State Sanitization** | Async Startup / Netty Write | O(1) Array Indexing | Zero-GC (Static Array) |
+| **Chunk Obfuscation** | Netty EventLoop Thread | O(N) Section Scan | Zero-GC (ThreadLocal Buffers) |
+| **Entity Visibility Radar** | Folia Region Scheduler | O(V) Spatial Hashing | Constant Object Pool |
+| **Stash Finder Profiler** | Netty Pipeline / 60s Task | O(1) Concurrent Map | Zero-GC (Atomic Counters) |
