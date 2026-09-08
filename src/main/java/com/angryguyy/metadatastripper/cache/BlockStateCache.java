@@ -25,17 +25,20 @@ public final class BlockStateCache {
     private static final BlockState[] SANITIZED_STATES;
 
     static {
-        int maxStates = 100000;
+        int registrySize = 100000;
         try {
-            maxStates = Block.BLOCK_STATE_REGISTRY.size();
+            registrySize = Block.BLOCK_STATE_REGISTRY.size() + 1000;
         } catch (Exception ignored) {}
 
-        SANITIZED_STATES = new BlockState[maxStates];
+        SANITIZED_STATES = new BlockState[registrySize];
 
-        for (int i = 0; i < maxStates; i++) {
+        for (int i = 0; i < registrySize; i++) {
             try {
                 BlockState original = Block.stateById(i);
-                SANITIZED_STATES[i] = applySanitization(original);
+                if (original != null) {
+                    BlockState sanitized = applySanitization(original);
+                    SANITIZED_STATES[i] = sanitized != original ? sanitized : null;
+                }
             } catch (Exception e) {
                 SANITIZED_STATES[i] = null;
             }
@@ -58,11 +61,13 @@ public final class BlockStateCache {
             return null;
         }
 
-        int id = Block.getId(state);
-        if (id >= 0 && id < SANITIZED_STATES.length) {
-            BlockState cached = SANITIZED_STATES[id];
-            return cached != null ? cached : state;
-        }
+        try {
+            int id = Block.getId(state);
+            if (id >= 0 && id < SANITIZED_STATES.length) {
+                BlockState cached = SANITIZED_STATES[id];
+                return cached != null ? cached : state;
+            }
+        } catch (Exception ignored) {}
 
         return state;
     }

@@ -12,6 +12,8 @@ import it.unimi.dsi.fastutil.shorts.ShortArraySet;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.network.protocol.game.*;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -19,7 +21,6 @@ import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 
 import org.bukkit.World.Environment;
-import org.bukkit.craftbukkit.CraftWorld;
 import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -28,7 +29,6 @@ import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 
 import java.lang.reflect.Field;
-import java.util.logging.Level;
 
 /**
  * The core network interception and payload manipulation module.
@@ -49,6 +49,7 @@ import java.util.logging.Level;
  * <b>Algorithmic Complexity:</b>
  * <ul>
  *   <li><b>Chunk Processing:</b> Utilizes ThreadLocal buffer reuse and O(1) {@code maybeHas} Fast-Skip evaluations to achieve true Zero-GC overhead.</li>
+ *   <li><b>Folia Compatibility:</b> 100% bypass of Bukkit API in network threads, using purely safe NMS state reads.</li>
  * </ul>
  */
 public final class NettyInjector implements Listener {
@@ -132,13 +133,13 @@ public final class NettyInjector implements Listener {
                             return;
                         }
                     } catch (Exception e) {
-                        plugin.getLogger().log(Level.WARNING, "Error while processing outbound packet for " + player.getName(), e);
+                        plugin.getLogger().log(java.util.logging.Level.WARNING, "Error while processing outbound packet for " + player.getName(), e);
                     }
                     super.write(ctx, msg, promise);
                 }
             });
         } catch (Exception e) {
-            plugin.getLogger().log(Level.SEVERE, "Failed to inject Netty handler for " + player.getName(), e);
+            plugin.getLogger().log(java.util.logging.Level.SEVERE, "Failed to inject Netty handler for " + player.getName(), e);
         }
     }
 
@@ -158,11 +159,14 @@ public final class NettyInjector implements Listener {
         }
 
         if (msg instanceof ClientboundBlockUpdatePacket packet) {
+            net.minecraft.world.entity.player.Player nmsPlayer = ((CraftPlayer) player).getHandle();
+            Level level = nmsPlayer.level();
+
             BlockState original = packet.getBlockState();
             BlockState sanitized = BlockStateCache.sanitize(original);
 
-            if (original.getBlock() == Blocks.BEDROCK && packet.getPos().getY() > player.getWorld().getMinHeight()) {
-                Environment env = player.getWorld().getEnvironment();
+            if (original.getBlock() == Blocks.BEDROCK && packet.getPos().getY() > level.getMinBuildHeight()) {
+                Environment env = getEnvironmentFast(level);
                 sanitized = ObfuscationPalette.getObfuscatedBlock(plugin.getEngineMode(), packet.getPos(), env);
             }
 
@@ -208,18 +212,21 @@ public final class NettyInjector implements Listener {
         else if (msg instanceof ClientboundLevelChunkWithLightPacket chunkPacket) {
             ctx.write(msg, promise);
 
-            LevelChunk chunk = ((CraftWorld) player.getWorld()).getHandle().getChunkIfLoaded(chunkPacket.getX(), chunkPacket.getZ());
+            net.minecraft.world.entity.player.Player nmsPlayer = ((CraftPlayer) player).getHandle();
+            ServerLevel serverLevel = (ServerLevel) nmsPlayer.level();
+
+            LevelChunk chunk = serverLevel.getChunkSource().getChunkNow(chunkPacket.getX(), chunkPacket.getZ());
             if (chunk == null) {
                 return null;
             }
 
-            Environment env = player.getWorld().getEnvironment();
+            Environment env = getEnvironmentFast(serverLevel);
             int engineMode = plugin.getEngineMode();
             boolean isAggressiveMode = engineMode >= 2;
 
             BlockState stone = ObfuscationPalette.getObfuscatedBlock(engineMode, new BlockPos(0, 1, 0), env);
             BlockState deepslate = ObfuscationPalette.getObfuscatedBlock(engineMode, new BlockPos(0, -1, 0), env);
-            int minBuildHeight = player.getWorld().getMinHeight();
+            int minBuildHeight = serverLevel.getMinBuildHeight();
 
             ctx.channel().eventLoop().execute(() -> {
                 try {
@@ -299,6 +306,19 @@ public final class NettyInjector implements Listener {
     }
 
     /**
+     * Evaluates the Bukkit Environment completely natively without invoking the Bukkit API,
+     * bypassing the Folia AsyncCatcher when queried from an I/O thread.
+     *
+     * @param level the native NMS Level instance
+     * @return the mapped Bukkit Environment
+     */
+    private Environment getEnvironmentFast(Level level) {
+        if (level.dimension() == Level.NETHER) return Environment.NETHER;
+        if (level.dimension() == Level.END) return Environment.THE_END;
+        return Environment.NORMAL;
+    }
+
+    /**
      * Safely uninjects the custom duplex handler from the player's network channel.
      * Guaranteed to execute cleanly on the Netty event loop to prevent memory leaks.
      *
@@ -315,7 +335,7 @@ public final class NettyInjector implements Listener {
                 } catch (Exception ignored) {}
             });
         } catch (Exception e) {
-            plugin.getLogger().log(Level.WARNING, "Could not properly detach Netty handler for " + player.getName(), e);
+            plugin.getLogger().log(java.util.logging.Level.WARNING, "Could not properly detach Netty handler for " + player.getName(), e);
         }
     }
 }

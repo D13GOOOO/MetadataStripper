@@ -14,7 +14,7 @@ import org.bukkit.World.Environment;
  * <p>
  * <b>Algorithmic Complexity:</b>
  * <ul>
- *   <li><b>Resolution:</b> O(1) constant-time evaluation utilizing pre-cached static state references.</li>
+ *   <li><b>Resolution:</b> O(1) constant-time evaluation utilizing pre-cached static state references and tableswitch evaluation.</li>
  * </ul>
  */
 public final class ObfuscationPalette {
@@ -47,14 +47,10 @@ public final class ObfuscationPalette {
      */
     @SuppressWarnings("unused")
     public static BlockState getObfuscatedBlock(int engineMode, BlockPos pos, Environment environment) {
-        if (environment == Environment.THE_END) {
-            return END_STONE;
-        }
-
-        if (environment == Environment.NETHER) {
-            return NETHERRACK;
-        }
-
-        return pos.getY() < 0 ? DEEPSLATE : STONE;
+        return switch (environment) {
+            case THE_END -> END_STONE;
+            case NETHER -> NETHERRACK;
+            default -> pos.getY() < 0 ? DEEPSLATE : STONE;
+        };
     }
 }

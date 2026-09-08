@@ -3,6 +3,7 @@ package com.angryguyy.metadatastripper;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.bukkit.Bukkit;
@@ -11,10 +12,11 @@ import org.bukkit.plugin.PluginManager;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import com.angryguyy.metadatastripper.commands.AdminCommand;
+import com.angryguyy.metadatastripper.engine.EntityCullingEngine;
 import com.angryguyy.metadatastripper.listeners.NettyInjector;
 import com.angryguyy.metadatastripper.listeners.PlayerQuitListener;
 import com.angryguyy.metadatastripper.network.BlockEntityFilter;
-import com.angryguyy.metadatastripper.tasks.EntityVisibilityTask;
+import com.angryguyy.metadatastripper.util.LicenseManager;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -56,11 +58,8 @@ public final class MetadataStripper extends JavaPlugin {
     }
 
     private NettyInjector nettyInjector;
-
     private int baseEngineMode;
     private int alertThreshold;
-    private final Set<String> ignoredWorlds = new HashSet<>();
-    private final Set<String> sensitiveEntities = new HashSet<>();
 
     /**
      * Executes the primary initialization phase of the engine.
@@ -69,8 +68,24 @@ public final class MetadataStripper extends JavaPlugin {
      */
     @Override
     public void onEnable() {
+        try {
+            Class.forName("com.angryguyy.metadatastripper.cache.BlockStateCache");
+        } catch (ClassNotFoundException ignored) {}
+
         saveDefaultConfig();
         loadConfiguration();
+
+        if (!LicenseManager.validateLicense(this)) {
+            getLogger().severe("================================================================");
+            getLogger().severe(" [SECURITY ERROR] Invalid or missing license configuration!");
+            getLogger().severe(" Please ensure 'client-name' and 'license-key' are properly set.");
+            getLogger().severe(" Shutting down MetadataStripper.");
+            getLogger().severe("================================================================");
+
+            getServer().getPluginManager().disablePlugin(this);
+            return;
+        }
+
         setupSensitiveBlocks();
 
         PluginManager pluginManager = getServer().getPluginManager();
@@ -86,11 +101,9 @@ public final class MetadataStripper extends JavaPlugin {
 
         Bukkit.getOnlinePlayers().forEach(nettyInjector::injectPlayer);
 
-        Bukkit.getGlobalRegionScheduler().runAtFixedRate(this, task -> {
-            new EntityVisibilityTask(this).run();
-        }, 20L, 10L);
+        EntityCullingEngine.initializeCullingTask(this);
 
-        Bukkit.getGlobalRegionScheduler().runAtFixedRate(this, task -> {
+        Bukkit.getAsyncScheduler().runAtFixedRate(this, task -> {
             for (org.bukkit.entity.Player player : Bukkit.getOnlinePlayers()) {
                 int violations = BlockEntityFilter.getAndResetViolations(player.getUniqueId());
                 if (violations >= alertThreshold) {
@@ -99,7 +112,7 @@ public final class MetadataStripper extends JavaPlugin {
                     Component alertMsg = Component.text("[MS-Alert] ", NamedTextColor.DARK_RED)
                             .append(Component.text(player.getName(), NamedTextColor.YELLOW))
                             .append(Component.text(" generated anomalous NBT traffic: ", NamedTextColor.GRAY))
-                            .append(Component.text(violations, NamedTextColor.RED))
+                            .append(Component.text(String.valueOf(violations), NamedTextColor.RED))
                             .append(Component.text(" in 60s. (Possible Stash Finder)", NamedTextColor.DARK_GRAY));
 
                     for (org.bukkit.entity.Player admin : Bukkit.getOnlinePlayers()) {
@@ -109,23 +122,17 @@ public final class MetadataStripper extends JavaPlugin {
                     }
                 }
             }
-        }, 1200L, 1200L);
+        }, 60L, 60L, TimeUnit.SECONDS);
 
-        getLogger().info("Lightweight Anti-Xray Engine enabled! Background tasks: 0, Dynamic Maps: 0");
+        getLogger().info("Lightweight Anti-Xray Engine enabled! Background tasks: 1, Dynamic Maps: 0");
     }
 
     /**
-     * Parses the flat-file configuration and populates the O(1) HashSets for rapid runtime evaluation.
+     * Parses the flat-file configuration settings.
      */
     private void loadConfiguration() {
         baseEngineMode = getConfig().getInt("engine-mode", 2);
         alertThreshold = getConfig().getInt("alert-threshold", 5000);
-
-        ignoredWorlds.clear();
-        ignoredWorlds.addAll(getConfig().getStringList("ignored-worlds"));
-
-        sensitiveEntities.clear();
-        sensitiveEntities.addAll(getConfig().getStringList("sensitive-entities"));
     }
 
     /**
@@ -138,9 +145,11 @@ public final class MetadataStripper extends JavaPlugin {
         for (int i = 0; i < Block.BLOCK_STATE_REGISTRY.size(); i++) {
             try {
                 BlockState state = Block.stateById(i);
-                org.bukkit.Material mat = state.createCraftBlockData().getMaterial();
-                if (configuredMaterials.contains(mat.name())) {
-                    sensitiveGlobal[i] = true;
+                if (state != null) {
+                    org.bukkit.Material mat = state.createCraftBlockData().getMaterial();
+                    if (configuredMaterials.contains(mat.name())) {
+                        sensitiveGlobal[i] = true;
+                    }
                 }
             } catch (Exception ignored) {}
         }
@@ -163,12 +172,11 @@ public final class MetadataStripper extends JavaPlugin {
      */
     @Override
     public void onDisable() {
-        ignoredWorlds.clear();
-        sensitiveEntities.clear();
-
         if (nettyInjector != null) {
             Bukkit.getOnlinePlayers().forEach(nettyInjector::removePlayer);
         }
+
+        EntityCullingEngine.shutdown();
 
         getLogger().info("MetadataStripper successfully disabled and memory cleared.");
     }
@@ -186,18 +194,4 @@ public final class MetadataStripper extends JavaPlugin {
         }
         return baseEngineMode;
     }
-
-    /**
-     * Retrieves the O(1) HashSet containing worlds explicitly excluded from packet obfuscation.
-     *
-     * @return the unmodifiable-like set of ignored world namespaces
-     */
-    public Set<String> getIgnoredWorlds() { return ignoredWorlds; }
-
-    /**
-     * Retrieves the O(1) HashSet containing entity types targeted for early network culling.
-     *
-     * @return the set of sensitive entity internal string signatures
-     */
-    public Set<String> getSensitiveEntities() { return sensitiveEntities; }
 }

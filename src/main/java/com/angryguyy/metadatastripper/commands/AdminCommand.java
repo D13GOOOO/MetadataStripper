@@ -14,6 +14,7 @@ import org.jetbrains.annotations.NotNull;
  * <p>
  * Evaluates administrative execution requests and delegates them to the appropriate subsystem,
  * such as hot-reloading the configuration or displaying realtime engine telemetry.
+ * Optimized to construct and dispatch complex Kyori Adventure components in a single packet.
  */
 public final class AdminCommand implements CommandExecutor {
 
@@ -54,19 +55,19 @@ public final class AdminCommand implements CommandExecutor {
         long entities = MetadataStripper.interceptedEntityPackets.get();
         long culled = MetadataStripper.culledEntities.get();
 
-        sender.sendMessage(Component.text("-----------------------------------", NamedTextColor.DARK_GRAY));
-        sender.sendMessage(Component.text(" MetadataStripper Telemetry", NamedTextColor.AQUA, TextDecoration.BOLD));
-        sender.sendMessage(Component.empty());
-        sender.sendMessage(Component.text(" NBT Packets Destroyed: ", NamedTextColor.GRAY)
-                .append(Component.text(String.format("%,d", nbt), NamedTextColor.GREEN)));
-        sender.sendMessage(Component.text(" Entity Data Blocked: ", NamedTextColor.GRAY)
-                .append(Component.text(String.format("%,d", entities), NamedTextColor.GREEN)));
-        sender.sendMessage(Component.text(" Entities Culled: ", NamedTextColor.GRAY)
-                .append(Component.text(String.format("%,d", culled), NamedTextColor.GREEN)));
-        sender.sendMessage(Component.empty());
-        sender.sendMessage(Component.text(" Engine Status: ", NamedTextColor.DARK_GRAY)
-                .append(Component.text("ZERO-GC OPTIMIZED", NamedTextColor.GREEN)));
-        sender.sendMessage(Component.text("-----------------------------------", NamedTextColor.DARK_GRAY));
+        Component telemetry = Component.text("-----------------------------------\n", NamedTextColor.DARK_GRAY)
+                .append(Component.text(" MetadataStripper Telemetry\n\n", NamedTextColor.AQUA, TextDecoration.BOLD))
+                .append(Component.text(" NBT Packets Destroyed: ", NamedTextColor.GRAY))
+                .append(Component.text(String.format("%,d", nbt) + "\n", NamedTextColor.GREEN))
+                .append(Component.text(" Entity Data Blocked: ", NamedTextColor.GRAY))
+                .append(Component.text(String.format("%,d", entities) + "\n", NamedTextColor.GREEN))
+                .append(Component.text(" Entities Culled: ", NamedTextColor.GRAY))
+                .append(Component.text(String.format("%,d", culled) + "\n\n", NamedTextColor.GREEN))
+                .append(Component.text(" Engine Status: ", NamedTextColor.DARK_GRAY))
+                .append(Component.text("ZERO-GC OPTIMIZED\n", NamedTextColor.GREEN))
+                .append(Component.text("-----------------------------------", NamedTextColor.DARK_GRAY));
+
+        sender.sendMessage(telemetry);
 
         return true;
     }

@@ -1,5 +1,6 @@
 package com.angryguyy.metadatastripper.listeners;
 
+import com.angryguyy.metadatastripper.engine.EntityCullingEngine;
 import com.angryguyy.metadatastripper.network.BlockEntityFilter;
 import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.event.EventHandler;
@@ -19,7 +20,7 @@ public final class PlayerQuitListener implements Listener {
 
     /**
      * Mutates the disconnecting player's altitude primitive to the specific world ceiling in O(1) time
-     * and purges the player's tracking profile from memory.
+     * and purges the player's tracking profiles from memory.
      *
      * @param event the native player quit event
      */
@@ -27,13 +28,15 @@ public final class PlayerQuitListener implements Listener {
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onPlayerQuit(PlayerQuitEvent event) {
         CraftPlayer craftPlayer = (CraftPlayer) event.getPlayer();
+        net.minecraft.world.entity.player.Player nmsPlayer = craftPlayer.getHandle();
 
-        double x = craftPlayer.getHandle().getX();
-        double z = craftPlayer.getHandle().getZ();
-        double maxY = craftPlayer.getWorld().getMaxHeight();
+        double x = nmsPlayer.getX();
+        double z = nmsPlayer.getZ();
+        double maxY = nmsPlayer.level().getMaxBuildHeight();
 
-        craftPlayer.getHandle().setPos(x, maxY, z);
+        nmsPlayer.setPos(x, maxY, z);
 
         BlockEntityFilter.removeProfile(craftPlayer.getUniqueId());
+        EntityCullingEngine.removePlayer(craftPlayer.getUniqueId());
     }
 }

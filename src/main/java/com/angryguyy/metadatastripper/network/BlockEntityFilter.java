@@ -39,6 +39,10 @@ public final class BlockEntityFilter {
      * @return true if the packet should be intercepted and destroyed, false otherwise
      */
     public static boolean shouldBlock(Player player, ClientboundBlockEntityDataPacket packet) {
+        if (!isSensitive(packet.getType())) {
+            return false;
+        }
+
         BlockPos pos = packet.getPos();
 
         double px = ((CraftPlayer) player).getHandle().getX();
@@ -50,13 +54,20 @@ public final class BlockEntityFilter {
         double dz = pz - pos.getZ();
 
         if ((dx * dx + dy * dy + dz * dz) > MAX_DISTANCE_SQ) {
-            if (isSensitive(packet.getType())) {
-                MetadataStripper.interceptedNbtPackets.incrementAndGet();
+            MetadataStripper.interceptedNbtPackets.incrementAndGet();
 
-                PROFILES.computeIfAbsent(player.getUniqueId(), k -> new AtomicInteger(0)).incrementAndGet();
+            UUID uuid = player.getUniqueId();
+            AtomicInteger profile = PROFILES.get(uuid);
 
-                return true;
+            if (profile == null) {
+                AtomicInteger newProfile = new AtomicInteger(0);
+                AtomicInteger existing = PROFILES.putIfAbsent(uuid, newProfile);
+                profile = existing != null ? existing : newProfile;
             }
+
+            profile.incrementAndGet();
+
+            return true;
         }
 
         return false;

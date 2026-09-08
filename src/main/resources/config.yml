@@ -2,6 +2,12 @@
 #     MetadataStripper - Configuration       #
 # ========================================== #
 
+# The BuildByBit username or identifier provided upon purchase
+client-name: "YOUR_BUILDBYBIT_USERNAME"
+
+# Your personal cryptographic license key
+license-key: "ENTER_YOUR_LICENSE_KEY"
+
 # Operational Engine Mode:
 # 2 = Full Aggressive (Ores + Containers + Cave Filling + Anti-Seed Cracker)
 # 1 = Lightweight (Ores + Containers + Anti-Seed Cracker, skips heavy cave filling)
