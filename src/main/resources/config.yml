@@ -2,19 +2,38 @@
 #     MetadataStripper - Configuration       #
 # ========================================== #
 
+# Operational Engine Mode:
+# 2 = Full Aggressive (Ores + Containers + Cave Filling + Anti-Seed Cracker)
+# 1 = Lightweight (Ores + Containers + Anti-Seed Cracker, skips heavy cave filling)
+engine-mode: 2
+
+# Profiler Alert Threshold (Stash Finder Detection):
+# Triggers a silent staff alert if a player intercepts more than this many NBT packets in 60 seconds.
+# 5000 is a safe baseline for detecting high-range Stash Finders without false positives from fast flying/elytra.
+alert-threshold: 5000
+
 # Worlds where the Anti-Xray is completely disabled (e.g., creative worlds or spawn)
 ignored-worlds:
   - "world_the_end"
   - "spawn_world"
 
 # Exact list of entities to hide from the client until they are in direct line of sight
-# (Counters Mob ESP & Storage ESP)
+# (Counters Mob ESP, Storage ESP, and Advanced Item ESP)
 sensitive-entities:
   - MINECART_CHEST
   - MINECART_HOPPER
   - ITEM_FRAME
   - GLOW_ITEM_FRAME
   - ARMOR_STAND
+  - DROPPED_ITEM
+  - EXPERIENCE_ORB
+  - CREEPER
+  - SKELETON
+  - SPIDER
+  - ZOMBIE
+  - ENDERMAN
+  - SLIME
+  - WITCH
   - VILLAGER
   - ZOMBIE_VILLAGER
   - IRON_GOLEM
@@ -53,7 +72,7 @@ sensitive-blocks:
   - ENDER_CHEST
   - SPAWNER
 
-  # Trial Chambers (1.21 - Mace Dungeon)
+  # Trial Chambers (1.21 - Mace Dungeon) - Tuff Variants
   - TRIAL_SPAWNER
   - VAULT
   - HEAVY_CORE
@@ -71,27 +90,76 @@ sensitive-blocks:
   - POLISHED_TUFF_STAIRS
   - POLISHED_TUFF_WALL
   - CHISELED_TUFF
-  - CHISELED_TUFF_BRICKS
+
+  # Trial Chambers (1.21) - Base Copper
   - COPPER_BLOCK
   - EXPOSED_COPPER
   - WEATHERED_COPPER
   - OXIDIZED_COPPER
+  - WAXED_COPPER_BLOCK
+  - WAXED_EXPOSED_COPPER
+  - WAXED_WEATHERED_COPPER
+  - WAXED_OXIDIZED_COPPER
+
+  # Trial Chambers (1.21) - Cut Copper
   - CUT_COPPER
   - EXPOSED_CUT_COPPER
   - WEATHERED_CUT_COPPER
   - OXIDIZED_CUT_COPPER
+  - WAXED_CUT_COPPER
+  - WAXED_EXPOSED_CUT_COPPER
+  - WAXED_WEATHERED_CUT_COPPER
+  - WAXED_OXIDIZED_CUT_COPPER
+
+  # Trial Chambers (1.21) - Cut Copper Stairs (Crucial for layouts)
+  - CUT_COPPER_STAIRS
+  - EXPOSED_CUT_COPPER_STAIRS
+  - WEATHERED_CUT_COPPER_STAIRS
+  - OXIDIZED_CUT_COPPER_STAIRS
+  - WAXED_CUT_COPPER_STAIRS
+  - WAXED_EXPOSED_CUT_COPPER_STAIRS
+  - WAXED_WEATHERED_CUT_COPPER_STAIRS
+  - WAXED_OXIDIZED_CUT_COPPER_STAIRS
+
+  # Trial Chambers (1.21) - Cut Copper Slabs (Crucial for floors)
+  - CUT_COPPER_SLAB
+  - EXPOSED_CUT_COPPER_SLAB
+  - WEATHERED_CUT_COPPER_SLAB
+  - OXIDIZED_CUT_COPPER_SLAB
+  - WAXED_CUT_COPPER_SLAB
+  - WAXED_EXPOSED_CUT_COPPER_SLAB
+  - WAXED_WEATHERED_CUT_COPPER_SLAB
+  - WAXED_OXIDIZED_CUT_COPPER_SLAB
+
+  # Trial Chambers (1.21) - Chiseled Copper
   - CHISELED_COPPER
   - EXPOSED_CHISELED_COPPER
   - WEATHERED_CHISELED_COPPER
   - OXIDIZED_CHISELED_COPPER
+  - WAXED_CHISELED_COPPER
+  - WAXED_EXPOSED_CHISELED_COPPER
+  - WAXED_WEATHERED_CHISELED_COPPER
+  - WAXED_OXIDIZED_CHISELED_COPPER
+
+  # Trial Chambers (1.21) - Doors & Trapdoors
   - COPPER_DOOR
   - EXPOSED_COPPER_DOOR
   - WEATHERED_COPPER_DOOR
   - OXIDIZED_COPPER_DOOR
+  - WAXED_COPPER_DOOR
+  - WAXED_EXPOSED_COPPER_DOOR
+  - WAXED_WEATHERED_COPPER_DOOR
+  - WAXED_OXIDIZED_COPPER_DOOR
   - COPPER_TRAPDOOR
   - EXPOSED_COPPER_TRAPDOOR
   - WEATHERED_COPPER_TRAPDOOR
   - OXIDIZED_COPPER_TRAPDOOR
+  - WAXED_COPPER_TRAPDOOR
+  - WAXED_EXPOSED_COPPER_TRAPDOOR
+  - WAXED_WEATHERED_COPPER_TRAPDOOR
+  - WAXED_OXIDIZED_COPPER_TRAPDOOR
+
+  # Trial Chambers (1.21) - Bulbs & Grates
   - COPPER_BULB
   - EXPOSED_COPPER_BULB
   - WEATHERED_COPPER_BULB
@@ -109,7 +177,7 @@ sensitive-blocks:
   - WAXED_WEATHERED_COPPER_GRATE
   - WAXED_OXIDIZED_COPPER_GRATE
 
-  # Abandoned Mineshafts (No Wood)
+  # Abandoned Mineshafts
   - COBWEB
   - RAIL
   - POWERED_RAIL

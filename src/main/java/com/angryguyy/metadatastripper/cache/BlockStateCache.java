@@ -10,8 +10,9 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
  * A highly optimized, Zero-GC cache mechanism for sanitizing native Mojang {@link BlockState} instances.
  * <p>
  * This class intercepts and cleanses sensitive block metadata that could be exploited by unauthorized
- * client-side modifications (e.g., chunk finders or growth-tracking ESPs). It strips variables such as
- * crop maturation stages, waterlogged statuses, and block orientations.
+ * client-side modifications (e.g., chunk finders, growth-tracking ESPs, and Seed Crackers).
+ * It strips variables such as crop maturation stages, waterlogged statuses, block orientations,
+ * leaf distances, and snow layer thicknesses which are often used to reverse-engineer world seeds.
  * <p>
  * <b>Algorithmic Complexity:</b>
  * <ul>
@@ -21,10 +22,6 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
  */
 public final class BlockStateCache {
 
-    /**
-     * A pre-computed Lookup Table (LUT) holding the sanitized equivalent of every registered BlockState.
-     * Maps the internal NMS BlockState ID directly to its sanitized counterpart.
-     */
     private static final BlockState[] SANITIZED_STATES;
 
     static {
@@ -38,29 +35,23 @@ public final class BlockStateCache {
         for (int i = 0; i < maxStates; i++) {
             try {
                 BlockState original = Block.stateById(i);
-                if (original != null) {
-                    SANITIZED_STATES[i] = applySanitization(original);
-                }
+                SANITIZED_STATES[i] = applySanitization(original);
             } catch (Exception e) {
                 SANITIZED_STATES[i] = null;
             }
         }
     }
 
-    /**
-     * Private constructor to prevent instantiation of this static utility class.
-     *
-     * @throws UnsupportedOperationException if instantiation is attempted
-     */
     private BlockStateCache() {
-        throw new UnsupportedOperationException("Utility class cannot be instantiated");
+        throw new UnsupportedOperationException("Utility class cannot be instantiated.");
     }
 
     /**
-     * Instantly retrieves the sanitized version of a provided Mojang {@link BlockState} via an O(1) array lookup.
+     * Retrieves the sanitized, mathematically flattened equivalent of a given block state.
+     * Evaluates instantaneously using a pre-computed array indexed by the native NMS Block ID.
      *
-     * @param state the original, potentially metadata-rich block state targeted for the network packet
-     * @return the pre-sanitized block state, or the identical original state if no sanitization was required
+     * @param state the original, potentially sensitive block state
+     * @return the spoofed block state, or the original state if no sanitization was required
      */
     public static BlockState sanitize(BlockState state) {
         if (state == null) {
@@ -77,14 +68,11 @@ public final class BlockStateCache {
     }
 
     /**
-     * Deep-scans and scrubs a {@link BlockState} of all exploitable client-side properties.
-     * <p>
-     * Evaluates and resets sequential state properties such as generic ages (AGE_1 to AGE_25),
-     * growth stages, berry flags, and waterlogged flags. It also unifies the directional axis
-     * of deepslate to homogenize the underground visual obfuscation palette.
+     * Internal mutation engine that systematically strips deterministic metadata properties
+     * from a given block state. This normalizes patterns to neutralize Seed Cracking algorithms.
      *
-     * @param state the original block state to evaluate during class initialization
-     * @return a newly mutated block state stripped of identifiable metadata, or the original state if unaffected
+     * @param state the native block state evaluated during initialization
+     * @return a normalized, baseline representation of the state
      */
     private static BlockState applySanitization(BlockState state) {
         BlockState spoofed = state;
@@ -94,52 +82,58 @@ public final class BlockStateCache {
             spoofed = spoofed.setValue(BlockStateProperties.AGE_1, 0);
             modified = true;
         }
-
         if (spoofed.hasProperty(BlockStateProperties.AGE_2) && spoofed.getValue(BlockStateProperties.AGE_2) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.AGE_2, 0);
             modified = true;
         }
-
         if (spoofed.hasProperty(BlockStateProperties.AGE_3) && spoofed.getValue(BlockStateProperties.AGE_3) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.AGE_3, 0);
             modified = true;
         }
-
         if (spoofed.hasProperty(BlockStateProperties.AGE_5) && spoofed.getValue(BlockStateProperties.AGE_5) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.AGE_5, 0);
             modified = true;
         }
-
         if (spoofed.hasProperty(BlockStateProperties.AGE_7) && spoofed.getValue(BlockStateProperties.AGE_7) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.AGE_7, 0);
             modified = true;
         }
-
         if (spoofed.hasProperty(BlockStateProperties.AGE_15) && spoofed.getValue(BlockStateProperties.AGE_15) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.AGE_15, 0);
             modified = true;
         }
-
         if (spoofed.hasProperty(BlockStateProperties.AGE_25) && spoofed.getValue(BlockStateProperties.AGE_25) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.AGE_25, 0);
             modified = true;
         }
-
         if (spoofed.hasProperty(BlockStateProperties.STAGE) && spoofed.getValue(BlockStateProperties.STAGE) > 0) {
             spoofed = spoofed.setValue(BlockStateProperties.STAGE, 0);
             modified = true;
         }
-
         if (spoofed.hasProperty(BlockStateProperties.BERRIES) && spoofed.getValue(BlockStateProperties.BERRIES)) {
             spoofed = spoofed.setValue(BlockStateProperties.BERRIES, false);
             modified = true;
         }
-
         if (spoofed.hasProperty(BlockStateProperties.WATERLOGGED) && spoofed.getValue(BlockStateProperties.WATERLOGGED)) {
             spoofed = spoofed.setValue(BlockStateProperties.WATERLOGGED, false);
             modified = true;
         }
-
+        if (spoofed.hasProperty(BlockStateProperties.DISTANCE) && spoofed.getValue(BlockStateProperties.DISTANCE) != 1) {
+            spoofed = spoofed.setValue(BlockStateProperties.DISTANCE, 1);
+            modified = true;
+        }
+        if (spoofed.hasProperty(BlockStateProperties.LAYERS) && spoofed.getValue(BlockStateProperties.LAYERS) != 1) {
+            spoofed = spoofed.setValue(BlockStateProperties.LAYERS, 1);
+            modified = true;
+        }
+        if (spoofed.hasProperty(BlockStateProperties.MOISTURE) && spoofed.getValue(BlockStateProperties.MOISTURE) > 0) {
+            spoofed = spoofed.setValue(BlockStateProperties.MOISTURE, 0);
+            modified = true;
+        }
+        if (spoofed.hasProperty(BlockStateProperties.PICKLES) && spoofed.getValue(BlockStateProperties.PICKLES) != 1) {
+            spoofed = spoofed.setValue(BlockStateProperties.PICKLES, 1);
+            modified = true;
+        }
         if (spoofed.getBlock() == Blocks.DEEPSLATE && spoofed.hasProperty(BlockStateProperties.AXIS)) {
             if (spoofed.getValue(BlockStateProperties.AXIS) != Direction.Axis.Y) {
                 spoofed = spoofed.setValue(BlockStateProperties.AXIS, Direction.Axis.Y);

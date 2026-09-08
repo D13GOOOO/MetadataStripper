@@ -30,7 +30,7 @@ public final class ObfuscationPalette {
      * @throws UnsupportedOperationException if instantiation is attempted
      */
     private ObfuscationPalette() {
-        throw new UnsupportedOperationException("Utility class cannot be instantiated");
+        throw new UnsupportedOperationException("Utility class cannot be instantiated.");
     }
 
     /**
@@ -40,11 +40,12 @@ public final class ObfuscationPalette {
      * End Stone for the End). For normal worlds, it dynamically branches based on the altitude coordinate,
      * returning Deepslate for sub-surface layers (Y &lt; 0) and Stone for upper layers.
      *
-     * @param engineMode  the configured operational engine mode
+     * @param engineMode  the configured operational engine mode (reserved for future palette variants)
      * @param pos         the targeted block position vector
      * @param environment the Bukkit world environment type
      * @return the pre-cached uniform background {@link BlockState}
      */
+    @SuppressWarnings("unused")
     public static BlockState getObfuscatedBlock(int engineMode, BlockPos pos, Environment environment) {
         if (environment == Environment.THE_END) {
             return END_STONE;

@@ -13,6 +13,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.network.protocol.game.*;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
@@ -36,23 +37,30 @@ import java.util.logging.Level;
  * pipeline of each connected player. It operates as the final network gateway, filtering and
  * obfuscating outgoing packets before they reach the client socket.
  * <p>
+ * Admin and moderation staff possessing the {@code metadatastripper.bypass} permission
+ * bypass all spatial culling and packet manipulation algorithms inherently.
+ * <p>
  * <b>Proximity Culling Engine ("Fire & Forget"):</b>
  * <ul>
- *   <li><b>Surface Layer (Y &ge; 5):</b> Permits normal chunk rendering while selectively obfuscating targeted blocks (Ores, Containers).</li>
- *   <li><b>Subterranean Layer (Y &lt; 5):</b> Aggressively forces all air and fluid states into opaque obfuscation blocks, completely neutralizing Freecam exploits.</li>
+ *   <li><b>Surface Layer (Y &ge; 5):</b> Permits normal chunk rendering while selectively obfuscating targeted blocks.</li>
+ *   <li><b>Subterranean Layer (Y &lt; 5):</b> Aggressively forces air and fluid states into opaque blocks, neutralizing Freecam exploits.</li>
+ *   <li><b>Anti-Seed Cracking:</b> Flattens Bedrock patterns by sending bedrock above world minimum as solid Deepslate/Stone.</li>
  * </ul>
  * <b>Algorithmic Complexity:</b>
  * <ul>
- *   <li><b>Chunk Processing:</b> Utilizes buffer reuse and O(1) {@code maybeHas} Fast-Skip evaluations to eliminate GC overhead during massive chunk loading.</li>
+ *   <li><b>Chunk Processing:</b> Utilizes ThreadLocal buffer reuse and O(1) {@code maybeHas} Fast-Skip evaluations to achieve true Zero-GC overhead.</li>
  * </ul>
  */
 public final class NettyInjector implements Listener {
 
     private static final String HANDLER_NAME = "MetadataStripper";
+    private static final int AGGRESSIVE_Y_MAX = 5;
+
     private static Field sectionStatesField;
     private static Field sectionPositionsField;
 
-    private static final int AGGRESSIVE_Y_MAX = 5;
+    private static final ThreadLocal<short[]> POS_BUFFER = ThreadLocal.withInitial(() -> new short[4096]);
+    private static final ThreadLocal<BlockState[]> STATE_BUFFER = ThreadLocal.withInitial(() -> new BlockState[4096]);
 
     static {
         try {
@@ -79,11 +87,23 @@ public final class NettyInjector implements Listener {
         this.plugin = plugin;
     }
 
+    /**
+     * Triggers pipeline injection when a player connects.
+     *
+     * @param event the player join event
+     */
+    @SuppressWarnings("unused")
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         injectPlayer(event.getPlayer());
     }
 
+    /**
+     * Safely unbinds the pipeline handler when a player disconnects.
+     *
+     * @param event the player quit event
+     */
+    @SuppressWarnings("unused")
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         removePlayer(event.getPlayer());
@@ -91,46 +111,61 @@ public final class NettyInjector implements Listener {
 
     /**
      * Injects the custom duplex handler into the player's network channel.
+     * Performs a Graceful Netty Ejection check first to prevent memory leaks during hot-reloads.
      *
      * @param player the target player instance
      */
     public void injectPlayer(Player player) {
-        Channel channel = ((CraftPlayer) player).getHandle().connection.connection.channel;
+        try {
+            Channel channel = ((CraftPlayer) player).getHandle().connection.connection.channel;
 
-        if (channel.pipeline().get(HANDLER_NAME) != null) {
-            return;
-        }
-
-        channel.pipeline().addBefore("packet_handler", HANDLER_NAME, new ChannelDuplexHandler() {
-            @Override
-            public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
-                try {
-                    msg = handlePacket(ctx, player, msg, promise);
-                    if (msg == null) {
-                        return;
-                    }
-                } catch (Exception e) {
-                    plugin.getLogger().log(Level.WARNING, "Error while processing outbound packet for " + player.getName(), e);
-                }
-
-                super.write(ctx, msg, promise);
+            if (channel.pipeline().get(HANDLER_NAME) != null) {
+                channel.pipeline().remove(HANDLER_NAME);
             }
-        });
+
+            channel.pipeline().addBefore("packet_handler", HANDLER_NAME, new ChannelDuplexHandler() {
+                @Override
+                public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+                    try {
+                        msg = handlePacket(ctx, player, msg, promise);
+                        if (msg == null) {
+                            return;
+                        }
+                    } catch (Exception e) {
+                        plugin.getLogger().log(Level.WARNING, "Error while processing outbound packet for " + player.getName(), e);
+                    }
+                    super.write(ctx, msg, promise);
+                }
+            });
+        } catch (Exception e) {
+            plugin.getLogger().log(Level.SEVERE, "Failed to inject Netty handler for " + player.getName(), e);
+        }
     }
 
     /**
-     * intercepts, evaluates, and mutates outgoing server packets.
+     * Intercepts, evaluates, and mutates outgoing server packets.
      *
-     * @param ctx    the channel handler context
-     * @param player the recipient player
-     * @param msg    the raw outgoing packet
+     * @param ctx     the channel handler context
+     * @param player  the recipient player
+     * @param msg     the raw outgoing packet
      * @param promise the channel promise
      * @return the mutated packet, or null to cancel the transmission
      */
+    @SuppressWarnings("ConstantValue")
     private Object handlePacket(ChannelHandlerContext ctx, Player player, Object msg, ChannelPromise promise) {
+        if (player.hasPermission("metadatastripper.bypass")) {
+            return msg;
+        }
+
         if (msg instanceof ClientboundBlockUpdatePacket packet) {
             BlockState original = packet.getBlockState();
             BlockState sanitized = BlockStateCache.sanitize(original);
+
+            if (original.getBlock() == Blocks.BEDROCK && packet.getPos().getY() > player.getWorld().getMinHeight()) {
+                Environment env = player.getWorld().getEnvironment();
+                sanitized = ObfuscationPalette.getObfuscatedBlock(plugin.getEngineMode(), packet.getPos(), env);
+            }
+
             if (original != sanitized) {
                 return new ClientboundBlockUpdatePacket(packet.getPos(), sanitized);
             }
@@ -155,7 +190,21 @@ public final class NettyInjector implements Listener {
                 } catch (IllegalAccessException ignored) {}
             }
         }
-
+        else if (msg instanceof ClientboundBlockEntityDataPacket packet) {
+            if (com.angryguyy.metadatastripper.network.BlockEntityFilter.shouldBlock(player, packet)) {
+                return null;
+            }
+        }
+        else if (msg instanceof ClientboundSetEntityDataPacket packet) {
+            if (com.angryguyy.metadatastripper.network.EntityDataFilter.shouldBlock(player, packet.id())) {
+                return null;
+            }
+        }
+        else if (msg instanceof ClientboundSetEquipmentPacket packet) {
+            if (com.angryguyy.metadatastripper.network.EntityDataFilter.shouldBlock(player, packet.getEntity())) {
+                return null;
+            }
+        }
         else if (msg instanceof ClientboundLevelChunkWithLightPacket chunkPacket) {
             ctx.write(msg, promise);
 
@@ -165,16 +214,19 @@ public final class NettyInjector implements Listener {
             }
 
             Environment env = player.getWorld().getEnvironment();
-            BlockState stone = ObfuscationPalette.getObfuscatedBlock(plugin.getEngineMode(), new BlockPos(0, 1, 0), env);
-            BlockState deepslate = ObfuscationPalette.getObfuscatedBlock(plugin.getEngineMode(), new BlockPos(0, -1, 0), env);
+            int engineMode = plugin.getEngineMode();
+            boolean isAggressiveMode = engineMode >= 2;
+
+            BlockState stone = ObfuscationPalette.getObfuscatedBlock(engineMode, new BlockPos(0, 1, 0), env);
+            BlockState deepslate = ObfuscationPalette.getObfuscatedBlock(engineMode, new BlockPos(0, -1, 0), env);
             int minBuildHeight = player.getWorld().getMinHeight();
 
             ctx.channel().eventLoop().execute(() -> {
                 try {
                     LevelChunkSection[] sections = chunk.getSections();
 
-                    short[] bufferPos = new short[4096];
-                    BlockState[] bufferState = new BlockState[4096];
+                    short[] bufferPos = POS_BUFFER.get();
+                    BlockState[] bufferState = STATE_BUFFER.get();
 
                     for (int i = 0; i < sections.length; i++) {
                         LevelChunkSection section = sections[i];
@@ -182,18 +234,16 @@ public final class NettyInjector implements Listener {
 
                         int sectionY = (minBuildHeight >> 4) + i;
                         int globalSectionY = sectionY << 4;
-                        boolean isAggressiveZone = globalSectionY < AGGRESSIVE_Y_MAX;
+                        boolean isAggressiveZone = isAggressiveMode && (globalSectionY < AGGRESSIVE_Y_MAX);
 
                         boolean needsObfuscation = section.getStates().maybeHas(state -> {
                             try {
                                 int id = Block.getId(state);
                                 boolean isSensitive = id >= 0 && id < MetadataStripper.sensitiveGlobal.length && MetadataStripper.sensitiveGlobal[id];
-                                if (isSensitive) return true;
+                                boolean isCaveFiller = isAggressiveZone && (state.isAir() || !state.getFluidState().isEmpty());
+                                boolean isBedrock = state.getBlock() == Blocks.BEDROCK;
 
-                                if (isAggressiveZone) {
-                                    return state.isAir() || !state.getFluidState().isEmpty();
-                                }
-                                return false;
+                                return isSensitive || isCaveFiller || isBedrock;
                             } catch (Exception e) {
                                 return false;
                             }
@@ -209,11 +259,13 @@ public final class NettyInjector implements Listener {
                                 for (int z = 0; z < 16; z++) {
                                     BlockState state = section.getBlockState(x, y, z);
                                     int id = Block.getId(state);
+                                    int actualY = globalSectionY + y;
 
                                     boolean isSensitive = id >= 0 && id < MetadataStripper.sensitiveGlobal.length && MetadataStripper.sensitiveGlobal[id];
                                     boolean isCaveFiller = isAggressiveZone && (state.isAir() || !state.getFluidState().isEmpty());
+                                    boolean isExposedBedrock = state.getBlock() == Blocks.BEDROCK && actualY > minBuildHeight;
 
-                                    if (isSensitive || isCaveFiller) {
+                                    if (isSensitive || isCaveFiller || isExposedBedrock) {
                                         bufferPos[count] = (short) ((x << 8) | (z << 4) | y);
                                         bufferState[count] = obfuscationBlock;
                                         count++;
@@ -248,15 +300,22 @@ public final class NettyInjector implements Listener {
 
     /**
      * Safely uninjects the custom duplex handler from the player's network channel.
+     * Guaranteed to execute cleanly on the Netty event loop to prevent memory leaks.
      *
      * @param player the target player instance
      */
     public void removePlayer(Player player) {
-        Channel channel = ((CraftPlayer) player).getHandle().connection.connection.channel;
-        channel.eventLoop().submit(() -> {
-            if (channel.pipeline().get(HANDLER_NAME) != null) {
-                channel.pipeline().remove(HANDLER_NAME);
-            }
-        });
+        try {
+            Channel channel = ((CraftPlayer) player).getHandle().connection.connection.channel;
+            channel.eventLoop().execute(() -> {
+                try {
+                    if (channel.pipeline().get(HANDLER_NAME) != null) {
+                        channel.pipeline().remove(HANDLER_NAME);
+                    }
+                } catch (Exception ignored) {}
+            });
+        } catch (Exception e) {
+            plugin.getLogger().log(Level.WARNING, "Could not properly detach Netty handler for " + player.getName(), e);
+        }
     }
 }

@@ -1,15 +1,23 @@
 package com.angryguyy.metadatastripper;
 
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.bukkit.Bukkit;
+import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.PluginManager;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import com.angryguyy.metadatastripper.commands.AdminCommand;
 import com.angryguyy.metadatastripper.listeners.NettyInjector;
+import com.angryguyy.metadatastripper.listeners.PlayerQuitListener;
+import com.angryguyy.metadatastripper.network.BlockEntityFilter;
 import com.angryguyy.metadatastripper.tasks.EntityVisibilityTask;
 
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 
@@ -35,6 +43,10 @@ public final class MetadataStripper extends JavaPlugin {
      */
     public static final boolean[] sensitiveGlobal;
 
+    public static final AtomicLong interceptedNbtPackets = new AtomicLong(0);
+    public static final AtomicLong interceptedEntityPackets = new AtomicLong(0);
+    public static final AtomicLong culledEntities = new AtomicLong(0);
+
     static {
         int maxStates = 50000;
         try {
@@ -45,14 +57,15 @@ public final class MetadataStripper extends JavaPlugin {
 
     private NettyInjector nettyInjector;
 
-    private int engineMode;
+    private int baseEngineMode;
+    private int alertThreshold;
     private final Set<String> ignoredWorlds = new HashSet<>();
     private final Set<String> sensitiveEntities = new HashSet<>();
 
     /**
      * Executes the primary initialization phase of the engine.
      * Loads the deterministic configuration, computes the sensitive block bitset,
-     * and mounts the Netty injector directly into the active socket connections.
+     * mounts the Netty injector, and registers administrative commands.
      */
     @Override
     public void onEnable() {
@@ -64,9 +77,39 @@ public final class MetadataStripper extends JavaPlugin {
 
         nettyInjector = new NettyInjector(this);
         pluginManager.registerEvents(nettyInjector, this);
+        pluginManager.registerEvents(new PlayerQuitListener(), this);
+
+        PluginCommand msCommand = getCommand("ms");
+        if (msCommand != null) {
+            msCommand.setExecutor(new AdminCommand(this));
+        }
+
         Bukkit.getOnlinePlayers().forEach(nettyInjector::injectPlayer);
 
-        new EntityVisibilityTask(this).runTaskTimer(this, 20L, 10L);
+        Bukkit.getGlobalRegionScheduler().runAtFixedRate(this, task -> {
+            new EntityVisibilityTask(this).run();
+        }, 20L, 10L);
+
+        Bukkit.getGlobalRegionScheduler().runAtFixedRate(this, task -> {
+            for (org.bukkit.entity.Player player : Bukkit.getOnlinePlayers()) {
+                int violations = BlockEntityFilter.getAndResetViolations(player.getUniqueId());
+                if (violations >= alertThreshold) {
+                    getLogger().warning("[Profiler] " + player.getName() + " triggered exploit threshold: " + violations + " NBT packets in 60s.");
+
+                    Component alertMsg = Component.text("[MS-Alert] ", NamedTextColor.DARK_RED)
+                            .append(Component.text(player.getName(), NamedTextColor.YELLOW))
+                            .append(Component.text(" generated anomalous NBT traffic: ", NamedTextColor.GRAY))
+                            .append(Component.text(violations, NamedTextColor.RED))
+                            .append(Component.text(" in 60s. (Possible Stash Finder)", NamedTextColor.DARK_GRAY));
+
+                    for (org.bukkit.entity.Player admin : Bukkit.getOnlinePlayers()) {
+                        if (admin.hasPermission("metadatastripper.admin")) {
+                            admin.sendMessage(alertMsg);
+                        }
+                    }
+                }
+            }
+        }, 1200L, 1200L);
 
         getLogger().info("Lightweight Anti-Xray Engine enabled! Background tasks: 0, Dynamic Maps: 0");
     }
@@ -75,7 +118,8 @@ public final class MetadataStripper extends JavaPlugin {
      * Parses the flat-file configuration and populates the O(1) HashSets for rapid runtime evaluation.
      */
     private void loadConfiguration() {
-        engineMode = getConfig().getInt("engine-mode", 2);
+        baseEngineMode = getConfig().getInt("engine-mode", 2);
+        alertThreshold = getConfig().getInt("alert-threshold", 5000);
 
         ignoredWorlds.clear();
         ignoredWorlds.addAll(getConfig().getStringList("ignored-worlds"));
@@ -94,14 +138,23 @@ public final class MetadataStripper extends JavaPlugin {
         for (int i = 0; i < Block.BLOCK_STATE_REGISTRY.size(); i++) {
             try {
                 BlockState state = Block.stateById(i);
-                if (state != null) {
-                    org.bukkit.Material mat = state.createCraftBlockData().getMaterial();
-                    if (configuredMaterials.contains(mat.name())) {
-                        sensitiveGlobal[i] = true;
-                    }
+                org.bukkit.Material mat = state.createCraftBlockData().getMaterial();
+                if (configuredMaterials.contains(mat.name())) {
+                    sensitiveGlobal[i] = true;
                 }
             } catch (Exception ignored) {}
         }
+    }
+
+    /**
+     * Performs a live hot-reload of configurations and sensitive blocks without uninjecting clients.
+     * Ensures O(1) registry updates and a seamless transition for the active Netty pipeline.
+     */
+    public void reloadEngine() {
+        reloadConfig();
+        loadConfiguration();
+        Arrays.fill(sensitiveGlobal, false);
+        setupSensitiveBlocks();
     }
 
     /**
@@ -121,11 +174,18 @@ public final class MetadataStripper extends JavaPlugin {
     }
 
     /**
-     * Retrieves the configured operational engine mode.
+     * Retrieves the configured operational engine mode with dynamic TPS-based degradation.
+     * Falls back to a less computationally expensive obfuscation mode if server ticks per second
+     * drop below the optimal threshold.
      *
-     * @return the integer representing the obfuscation engine heuristic strategy
+     * @return the active integer representing the obfuscation engine heuristic strategy
      */
-    public int getEngineMode() { return engineMode; }
+    public int getEngineMode() {
+        if (baseEngineMode > 1 && Bukkit.getTPS()[0] < 18.5) {
+            return 1;
+        }
+        return baseEngineMode;
+    }
 
     /**
      * Retrieves the O(1) HashSet containing worlds explicitly excluded from packet obfuscation.

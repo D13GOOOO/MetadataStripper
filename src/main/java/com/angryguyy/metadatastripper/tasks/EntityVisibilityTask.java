@@ -4,29 +4,49 @@ import com.angryguyy.metadatastripper.MetadataStripper;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
-import org.bukkit.scheduler.BukkitRunnable;
 
 import java.util.Set;
 
 /**
- * Ultra-lightweight Entity Culling Radar.
+ * Ultra-lightweight Entity Culling Radar with Dynamic TPS Auto-Tuning.
  * <p>
  * Replaces the heavy Netty interception for moving entities. Runs routinely
- * on the main thread, utilizing native NMS spatial hashing and native line-of-sight
- * raycasting to defeat Player ESP and Mob/Storage ESP without degrading TPS.
+ * utilizing native spatial hashing and line-of-sight raycasting.
+ * <p>
+ * <b>Folia Supported:</b> Fully compliant with the Paper/Folia Global Region Scheduling API.
+ * Dispatches bounding box queries and raycasts directly to the specific region thread owning each player,
+ * preventing cross-thread state corruption and crashing.
  */
-public final class EntityVisibilityTask extends BukkitRunnable {
+public final class EntityVisibilityTask implements Runnable {
 
     private final MetadataStripper plugin;
 
-    private static final double TRACKING_RADIUS = 48.0;
-
+    /**
+     * Constructs the visibility radar task.
+     *
+     * @param plugin the main plugin instance
+     */
     public EntityVisibilityTask(MetadataStripper plugin) {
         this.plugin = plugin;
     }
 
+    /**
+     * Executes the proximity and line-of-sight evaluations for all active connections.
+     * Adjusts the spatial tracking radius dynamically based on the 1-minute server TPS average.
+     */
     @Override
     public void run() {
+        double currentTps = Bukkit.getTPS()[0];
+
+        final double trackingRadius;
+        if (currentTps < 15.0) {
+            trackingRadius = 16.0;
+        } else if (currentTps < 18.5) {
+            trackingRadius = 32.0;
+        } else {
+            trackingRadius = 48.0;
+        }
+
         Set<String> sensitiveNames = plugin.getSensitiveEntities();
 
         for (Player player : Bukkit.getOnlinePlayers()) {
@@ -34,24 +54,31 @@ public final class EntityVisibilityTask extends BukkitRunnable {
                 continue;
             }
 
-            for (Entity entity : player.getNearbyEntities(TRACKING_RADIUS, TRACKING_RADIUS, TRACKING_RADIUS)) {
-                if (entity.equals(player)) {
-                    continue; // Ignora se stesso
+            player.getScheduler().execute(plugin, () -> {
+                if (!player.isOnline()) {
+                    return;
                 }
 
-                boolean isPlayer = entity instanceof Player;
-                boolean isSensitive = sensitiveNames.contains(entity.getType().name());
+                for (Entity entity : player.getNearbyEntities(trackingRadius, trackingRadius, trackingRadius)) {
+                    if (entity.equals(player)) {
+                        continue;
+                    }
 
-                if (!isPlayer && !isSensitive) {
-                    continue;
-                }
+                    boolean isPlayer = entity instanceof Player;
+                    boolean isSensitive = sensitiveNames.contains(entity.getType().name());
 
-                if (player.hasLineOfSight(entity)) {
-                    player.showEntity(plugin, entity);
-                } else {
-                    player.hideEntity(plugin, entity);
+                    if (!isPlayer && !isSensitive) {
+                        continue;
+                    }
+
+                    if (player.hasLineOfSight(entity)) {
+                        player.showEntity(plugin, entity);
+                    } else {
+                        player.hideEntity(plugin, entity);
+                        MetadataStripper.culledEntities.incrementAndGet();
+                    }
                 }
-            }
+            }, null, 1L);
         }
     }
 }

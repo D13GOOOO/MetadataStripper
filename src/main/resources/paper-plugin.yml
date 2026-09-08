@@ -4,3 +4,9 @@ main: com.angryguyy.metadatastripper.MetadataStripper
 description: Strips sensitive block metadata natively via Netty injection.
 api-version: '1.21'
 folia-supported: true
+
+commands:
+  ms:
+    description: Shows live telemetry and metrics for MetadataStripper.
+    permission: metadatastripper.admin
+    usage: /ms
