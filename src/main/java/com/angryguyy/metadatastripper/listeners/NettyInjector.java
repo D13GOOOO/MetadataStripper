@@ -165,7 +165,7 @@ public final class NettyInjector implements Listener {
             BlockState original = packet.getBlockState();
             BlockState sanitized = BlockStateCache.sanitize(original);
 
-            if (original.getBlock() == Blocks.BEDROCK && packet.getPos().getY() > level.getMinBuildHeight()) {
+            if (original.getBlock() == Blocks.BEDROCK && packet.getPos().getY() > player.getWorld().getMinHeight()) {
                 Environment env = getEnvironmentFast(level);
                 sanitized = ObfuscationPalette.getObfuscatedBlock(plugin.getEngineMode(), packet.getPos(), env);
             }
@@ -226,7 +226,7 @@ public final class NettyInjector implements Listener {
 
             BlockState stone = ObfuscationPalette.getObfuscatedBlock(engineMode, new BlockPos(0, 1, 0), env);
             BlockState deepslate = ObfuscationPalette.getObfuscatedBlock(engineMode, new BlockPos(0, -1, 0), env);
-            int minBuildHeight = serverLevel.getMinBuildHeight();
+            int minBuildHeight = player.getWorld().getMinHeight();
 
             ctx.channel().eventLoop().execute(() -> {
                 try {

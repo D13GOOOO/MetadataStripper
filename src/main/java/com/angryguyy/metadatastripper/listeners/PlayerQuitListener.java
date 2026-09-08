@@ -32,7 +32,7 @@ public final class PlayerQuitListener implements Listener {
 
         double x = nmsPlayer.getX();
         double z = nmsPlayer.getZ();
-        double maxY = nmsPlayer.level().getMaxBuildHeight();
+        double maxY = craftPlayer.getWorld().getMaxHeight();
 
         nmsPlayer.setPos(x, maxY, z);
 
