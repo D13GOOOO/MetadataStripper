@@ -165,6 +165,20 @@ public final class BlockEntityFilter {
     }
 
     /**
+     * Safely performs garbage collection by sweeping orphaned UUID profiles.
+     * <p>
+     * Designed to be called by a low-priority global scheduler task to ensure
+     * disconnected players or fake NPC entities do not cause memory leaks
+     * if they bypass the standard PlayerQuitEvent.
+     *
+     * @param activeUuids a set of currently online and valid player UUIDs
+     */
+    public static void cleanOrphans(Set<UUID> activeUuids) {
+        PROFILES.keySet().removeIf(uuid -> !activeUuids.contains(uuid));
+        POSITIONS.keySet().removeIf(uuid -> !activeUuids.contains(uuid));
+    }
+
+    /**
      * Purges all static player profiles and configuration data.
      * Primarily used during plugin shutdown to leave a clean memory state.
      */

@@ -4,51 +4,46 @@ import com.angryguyy.metadatastripper.MetadataStripper;
 import org.bukkit.configuration.file.FileConfiguration;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 
 /**
- * Algorithmic local license validator.
+ * Asymmetric cryptographic license validator.
  * <p>
- * This utility generates and validates cryptographic signature keys bound directly to the client's
- * configured username/identifier. It serves as an installation gate during plugin startup without
- * requiring external remote server lookups or constant plugin recompilation.
+ * This utility validates ECDSA (Elliptic Curve Digital Signature Algorithm) cryptographic signatures
+ * bound to the client's configured username. By utilizing a Public Key Infrastructure (PKI) approach,
+ * the plugin can securely verify licenses offline without ever exposing the private generation key
+ * within the distributed JAR file, rendering decompilation and reverse-engineering completely ineffective.
  * <p>
  * <b>Architectural Notes:</b>
  * <ul>
  *   <li><b>Execution Context:</b> Invoked strictly during the plugin's {@code onEnable()} bootstrap phase
  *       on the main server thread or global region thread.</li>
- *   <li><b>Security Design:</b> Employs standard SHA-256 hashing coupled with URL-safe Base64 encoding.
- *       Crucially, validation utilizes {@link MessageDigest#isEqual(byte[], byte[])} to perform a constant-time
- *       byte array comparison, successfully neutralizing potential timing attacks against the license key.</li>
+ *   <li><b>Security Design:</b> Employs {@code SHA256withECDSA}. The client JAR contains only the X.509
+ *       Public Key. The corresponding Private Key must remain secured on your distribution backend to
+ *       generate the valid Base64 signature strings provided to buyers.</li>
  * </ul>
  */
 public final class LicenseManager {
 
     /**
-     * Cryptographic salt used to anchor the license generation algorithm and prevent simple rainbow-table lookups.
+     * The X.509 encoded Elliptic Curve (EC) Public Key in Base64 format.
+     * REPLACE THIS with your actual generated public key for production.
      */
-    private static final String SECRET_SALT = "MetadataStripper-Secret-Salt-2026-X9!z";
+    private static final String PUBLIC_KEY_BASE64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAErlaGgYDRodpJlgu3EGr2xWI81CcRUR7IpbfsqaklY6zPjQEAI1V6hROKGw+TdVXfs9XlsTWxZ4OaADGqpn8wlA==";
 
-    /**
-     * Private constructor to prevent instantiation of this utility class.
-     *
-     * @throws UnsupportedOperationException if called via reflection.
-     */
     private LicenseManager() {
         throw new UnsupportedOperationException("Utility class cannot be instantiated.");
     }
 
     /**
-     * Validates the configuration's license key by checking if it mathematically matches
-     * the generated signature for the specified client name.
-     * <p>
-     * <b>Timing Attack Prevention:</b> Uses {@link MessageDigest#isEqual(byte[], byte[])} rather
-     * than standard string equality ({@code equals()}), ensuring comparison execution time is independent
-     * of the number of matching bytes.
+     * Validates the configuration's license key by verifying its ECDSA signature against the client name.
      *
-     * @param plugin the main plugin instance used to access configuration parameters ({@code client-name} and {@code license-key})
-     * @return {@code true} if the provided license key matches the client's cryptographic signature; {@code false} otherwise
+     * @param plugin the main plugin instance used to access configuration parameters
+     * @return {@code true} if the provided license key is a mathematically valid signature signed by your private key; {@code false} otherwise
      */
     public static boolean validateLicense(MetadataStripper plugin) {
         FileConfiguration config = plugin.getConfig();
@@ -59,37 +54,20 @@ public final class LicenseManager {
             return false;
         }
 
-        String expectedKey = generateKeyForClient(clientName);
-
-        return MessageDigest.isEqual(
-                expectedKey.getBytes(StandardCharsets.UTF_8),
-                licenseKey.getBytes(StandardCharsets.UTF_8)
-        );
-    }
-
-    /**
-     * Generates the valid cryptographic license key for a given client identifier.
-     * <p>
-     * This utility method can also be used externally by license provisioning tools or automated panels
-     * to generate the exact key that must be delivered to a customer.
-     * <p>
-     * <b>Generation Logic:</b> Converts the client name to lowercase, appends the secret salt,
-     * computes a SHA-256 hash, URL-encodes it without padding, and formats it as an uppercase string
-     * prefixed with {@code MS-} (truncated to 16 characters).
-     *
-     * @param clientName the username or unique corporate identifier of the buyer
-     * @return the unique cryptographic license key string, or {@code "INVALID-KEY"} if a cryptographic exception occurs
-     */
-    public static String generateKeyForClient(String clientName) {
         try {
-            String raw = clientName.toLowerCase() + ":" + SECRET_SALT;
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(raw.getBytes(StandardCharsets.UTF_8));
+            byte[] publicKeyBytes = Base64.getDecoder().decode(PUBLIC_KEY_BASE64);
+            X509EncodedKeySpec keySpec = new X509EncodedKeySpec(publicKeyBytes);
+            KeyFactory keyFactory = KeyFactory.getInstance("EC");
+            PublicKey publicKey = keyFactory.generatePublic(keySpec);
 
-            String encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(hash);
-            return "MS-" + encoded.substring(0, 16).toUpperCase();
+            Signature signature = Signature.getInstance("SHA256withECDSA");
+            signature.initVerify(publicKey);
+            signature.update(clientName.toLowerCase().getBytes(StandardCharsets.UTF_8));
+
+            byte[] signatureBytes = Base64.getDecoder().decode(licenseKey);
+            return signature.verify(signatureBytes);
         } catch (Exception e) {
-            return "INVALID-KEY";
+            return false;
         }
     }
 }

@@ -307,6 +307,19 @@ public final class ProximityRevealer implements Listener {
     }
 
     /**
+     * Safely performs garbage collection by sweeping orphaned UUID profiles.
+     * <p>
+     * Designed to be called by a low-priority global scheduler task to ensure
+     * disconnected players or fake NPC entities do not cause memory leaks
+     * if they bypass the standard PlayerQuitEvent.
+     *
+     * @param activeUuids a set of currently online and valid player UUIDs
+     */
+    public void cleanOrphans(Set<UUID> activeUuids) {
+        scanPositions.keySet().removeIf(uuid -> !activeUuids.contains(uuid));
+    }
+
+    /**
      * An immutable data carrier representing a player's last known quantized block position.
      * Used exclusively to calculate delta movements for optimized shell scanning.
      *

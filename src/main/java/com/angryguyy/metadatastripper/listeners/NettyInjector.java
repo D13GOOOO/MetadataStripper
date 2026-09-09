@@ -36,6 +36,7 @@ import java.lang.reflect.Modifier;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
@@ -665,5 +666,19 @@ public final class NettyInjector implements Listener {
         shuttingDown = true;
         bypassPlayers.clear();
         playerEntityIds.clear();
+    }
+
+    /**
+     * Safely performs garbage collection by sweeping orphaned UUID profiles.
+     * <p>
+     * Designed to be called by a low-priority global scheduler task to ensure
+     * disconnected players or fake NPC entities do not cause memory leaks
+     * if they bypass the standard PlayerQuitEvent.
+     *
+     * @param activeUuids a set of currently online and valid player UUIDs
+     */
+    public void cleanOrphans(Set<UUID> activeUuids) {
+        bypassPlayers.keySet().removeIf(uuid -> !activeUuids.contains(uuid));
+        playerEntityIds.keySet().removeIf(uuid -> !activeUuids.contains(uuid));
     }
 }

@@ -3,6 +3,7 @@ package com.angryguyy.metadatastripper;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.bukkit.Bukkit;
@@ -135,6 +136,9 @@ public final class MetadataStripper extends JavaPlugin {
     /** A reference to the global profiler task, allowing safe cancellation during shutdown or reloads. */
     private Runnable profilerCancellation = () -> { };
 
+    /** A reference to the global garbage collection task to prevent memory leaks from orphaned UUIDs. */
+    private Runnable gcCancellation = () -> { };
+
     /**
      * Executes the primary initialization phase of the engine.
      * <p>
@@ -146,6 +150,7 @@ public final class MetadataStripper extends JavaPlugin {
      *   <li>Mounts the {@link NettyInjector} to intercept raw outbound pipelines.</li>
      *   <li>Registers specialized Bukkit event listeners for proximity and logout events.</li>
      *   <li>Schedules the asynchronous Global Violation Profiler.</li>
+     *   <li>Schedules the asynchronous Memory Leak Garbage Collector.</li>
      * </ol>
      */
     @Override
@@ -229,7 +234,22 @@ public final class MetadataStripper extends JavaPlugin {
             }
         }, 1200L, 1200L);
 
-        getLogger().info("Lightweight Anti-Xray Engine enabled! Background tasks: 1, Dynamic Maps: 0");
+        gcCancellation = RegionSchedulerAdapter.scheduleGlobalRepeating(this, () -> {
+            Set<UUID> activeUuids = new HashSet<>();
+            for (org.bukkit.entity.Player player : Bukkit.getOnlinePlayers()) {
+                activeUuids.add(player.getUniqueId());
+            }
+            BlockEntityFilter.cleanOrphans(activeUuids);
+            EntityCullingEngine.cleanOrphans(activeUuids);
+            if (proximityRevealer != null) {
+                proximityRevealer.cleanOrphans(activeUuids);
+            }
+            if (nettyInjector != null) {
+                nettyInjector.cleanOrphans(activeUuids);
+            }
+        }, 6000L, 6000L);
+
+        getLogger().info("Lightweight Anti-Xray Engine enabled! Background tasks: 2, Dynamic Maps: 0");
     }
 
     /**
@@ -320,6 +340,9 @@ public final class MetadataStripper extends JavaPlugin {
     public void onDisable() {
         profilerCancellation.run();
         profilerCancellation = () -> { };
+
+        gcCancellation.run();
+        gcCancellation = () -> { };
 
         if (nettyInjector != null) {
             nettyInjector.shutdown();
