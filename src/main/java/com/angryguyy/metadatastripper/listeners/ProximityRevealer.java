@@ -310,6 +310,7 @@ public final class ProximityRevealer implements Listener {
      *
      * @param event the native player quit event
      */
+    @SuppressWarnings("unused")
     @EventHandler
     public void onPlayerQuit(org.bukkit.event.player.PlayerQuitEvent event) {
         scanPositions.remove(event.getPlayer().getUniqueId());

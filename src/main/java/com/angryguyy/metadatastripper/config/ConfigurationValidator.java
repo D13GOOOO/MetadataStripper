@@ -47,6 +47,7 @@ public final class ConfigurationValidator {
      *   <li>{@code alert-threshold}: Must be strictly greater than 0.</li>
      *   <li>{@code client-name} & {@code license-key}: Must be present and non-blank (acts as a local installation gate).</li>
      *   <li>{@code sensitive-blocks}: Must not be empty, and all entries must successfully map to valid Bukkit {@link Material} names.</li>
+     *   <li>{@code advanced}: All tuning parameters must be within their safe operational limits.</li>
      * </ul>
      *
      * @param configuration the raw {@link FileConfiguration} to inspect (typically loaded from {@code config.yml})
@@ -68,13 +69,38 @@ public final class ConfigurationValidator {
         }
 
         String clientName = configuration.getString("client-name", "");
-        if (clientName == null || clientName.isBlank()) {
+        if (clientName.isBlank()) {
             errors.add("client-name is required");
         }
 
         String licenseKey = configuration.getString("license-key", "");
-        if (licenseKey == null || licenseKey.isBlank()) {
+        if (licenseKey.isBlank()) {
             errors.add("license-key is required");
+        }
+
+        double degradationTps = configuration.getDouble("advanced.degradation-tps-threshold", -1.0);
+        if (degradationTps <= 0.0 || degradationTps > 20.0) {
+            errors.add("advanced.degradation-tps-threshold must be between 0.1 and 20.0");
+        }
+
+        double tacticalRadius = configuration.getDouble("advanced.tactical-culling-radius", -1.0);
+        if (tacticalRadius <= 0.0) {
+            errors.add("advanced.tactical-culling-radius must be greater than zero");
+        }
+
+        int maxPendingWrites = configuration.getInt("advanced.max-pending-region-writes", -1);
+        if (maxPendingWrites < 1) {
+            errors.add("advanced.max-pending-region-writes must be at least 1");
+        }
+
+        int proximityRadius = configuration.getInt("advanced.proximity-radius", -1);
+        if (proximityRadius < 1) {
+            errors.add("advanced.proximity-radius must be at least 1");
+        }
+
+        int raytraceDistance = configuration.getInt("advanced.raytrace-max-distance", -1);
+        if (raytraceDistance < 1) {
+            errors.add("advanced.raytrace-max-distance must be at least 1");
         }
 
         List<String> configuredMaterials = configuration.getStringList("sensitive-blocks");

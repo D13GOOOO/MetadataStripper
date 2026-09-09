@@ -2,7 +2,6 @@ package com.angryguyy.metadatastripper.network;
 
 import com.angryguyy.metadatastripper.MetadataStripper;
 import com.angryguyy.metadatastripper.engine.EntityCullingEngine;
-import org.bukkit.entity.Player;
 
 import java.util.UUID;
 
@@ -34,20 +33,6 @@ public final class EntityDataFilter {
      */
     private EntityDataFilter() {
         throw new UnsupportedOperationException("Utility class cannot be instantiated.");
-    }
-
-    /**
-     * Evaluates whether an entity metadata or equipment packet should be dropped based on spatial proximity.
-     * <p>
-     * Engineered to operate safely and concurrently on Netty I/O threads by unwrapping the player's
-     * identifier and routing the query to the pre-computed, lock-free spatial primitive array.
-     *
-     * @param player   the recipient player bound to the network channel
-     * @param entityId the network ID of the target entity the packet is attempting to update
-     * @return {@code true} if the packet is deemed out-of-bounds and must be destroyed; {@code false} if it should pass
-     */
-    public static boolean shouldBlock(Player player, int entityId) {
-        return shouldBlock(player.getUniqueId(), player.getEntityId(), entityId);
     }
 
     /**

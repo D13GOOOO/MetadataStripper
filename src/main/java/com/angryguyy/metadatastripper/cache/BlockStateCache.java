@@ -52,10 +52,8 @@ public final class BlockStateCache {
         for (int i = 0; i < registrySize; i++) {
             try {
                 BlockState original = Block.stateById(i);
-                if (original != null) {
-                    BlockState sanitized = applySanitization(original);
-                    SANITIZED_STATES[i] = (sanitized != original) ? sanitized : null;
-                }
+                BlockState sanitized = applySanitization(original);
+                SANITIZED_STATES[i] = (sanitized != original) ? sanitized : null;
             } catch (Exception e) {
                 SANITIZED_STATES[i] = null;
             }

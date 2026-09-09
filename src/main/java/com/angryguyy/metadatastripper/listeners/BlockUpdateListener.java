@@ -60,6 +60,7 @@ public final class BlockUpdateListener implements Listener {
      * @param event the native {@link BlockBreakEvent} dispatched by the server
      * @see Player#sendBlockChange(org.bukkit.Location, org.bukkit.block.data.BlockData)
      */
+    @SuppressWarnings("unused")
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockBreak(BlockBreakEvent event) {
         Player player = event.getPlayer();

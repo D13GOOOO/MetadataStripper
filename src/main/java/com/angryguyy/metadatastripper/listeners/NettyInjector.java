@@ -189,6 +189,7 @@ public final class NettyInjector implements Listener {
      *
      * @param event the native {@link PlayerJoinEvent}
      */
+    @SuppressWarnings("unused")
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         injectPlayer(event.getPlayer());
@@ -199,6 +200,7 @@ public final class NettyInjector implements Listener {
      *
      * @param event the native {@link PlayerQuitEvent}
      */
+    @SuppressWarnings("unused")
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         removePlayer(event.getPlayer());
@@ -214,6 +216,7 @@ public final class NettyInjector implements Listener {
      *
      * @param player the target player to inject. Marked {@code final} to ensure safe capture by the anonymous inner class.
      */
+    @SuppressWarnings("resource")
     public void injectPlayer(final Player player) {
         if (shuttingDown) {
             return;
@@ -235,7 +238,7 @@ public final class NettyInjector implements Listener {
                 private int pendingRegionWriteCount;
 
                 @Override
-                public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+                public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
                     if (shuttingDown) {
                         promise.setSuccess();
                         return;
@@ -298,7 +301,6 @@ public final class NettyInjector implements Listener {
      * @param msg        the native packet instance
      * @return the original packet, or {@code null} if the packet violates proximity rules and should be destroyed
      */
-    @SuppressWarnings({"unused", "deprecation"})
     private Object handlePacket(UUID playerUuid, Object msg) {
         if (Boolean.TRUE.equals(bypassPlayers.get(playerUuid))) {
             return msg;
@@ -339,6 +341,7 @@ public final class NettyInjector implements Listener {
      * @param completion     the completable future controlling the ordered queue
      * @param releaseSlot    the callback to decrement the backpressure queue count
      */
+    @SuppressWarnings("resource")
     private void writeRegionPacketAsync(ChannelHandlerContext ctx, Player player,
                                         Object originalPacket, ChannelPromise promise,
                                         CompletableFuture<Void> completion, Runnable releaseSlot) {
@@ -405,6 +408,7 @@ public final class NettyInjector implements Listener {
      * @param msg    the un-obfuscated region packet
      * @return the deeply obfuscated packet ready for client consumption, or {@code null} if it should be skipped
      */
+    @SuppressWarnings({"deprecation", "DuplicatedCode"})
     private Object handleRegionPacket(Player player, Object msg) {
         BlockEntityFilter.updatePosition(player);
 
@@ -610,14 +614,9 @@ public final class NettyInjector implements Listener {
             }
         }
 
-        Iterator<net.minecraft.network.protocol.Packet<?>> extraPackets = chunkData.getExtraPackets().iterator();
-        while (extraPackets.hasNext()) {
-            net.minecraft.network.protocol.Packet<?> extraPacket = extraPackets.next();
-            if (extraPacket instanceof ClientboundBlockEntityDataPacket blockEntityPacket
-                    && BlockEntityFilter.shouldBlock(playerUuid, blockEntityPacket.getType(), blockEntityPacket.getPos())) {
-                extraPackets.remove();
-            }
-        }
+        chunkData.getExtraPackets().removeIf(extraPacket ->
+                extraPacket instanceof ClientboundBlockEntityDataPacket blockEntityPacket
+                        && BlockEntityFilter.shouldBlock(playerUuid, blockEntityPacket.getType(), blockEntityPacket.getPos()));
     }
 
     /**

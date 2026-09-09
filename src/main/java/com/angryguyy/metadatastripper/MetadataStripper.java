@@ -305,11 +305,9 @@ public final class MetadataStripper extends JavaPlugin {
         for (int i = 0; i < sensitiveStates.length && i < Block.BLOCK_STATE_REGISTRY.size(); i++) {
             try {
                 BlockState state = Block.stateById(i);
-                if (state != null) {
-                    org.bukkit.Material mat = state.createCraftBlockData().getMaterial();
-                    if (configuredMaterials.contains(mat.name())) {
-                        sensitiveStates[i] = true;
-                    }
+                org.bukkit.Material mat = state.createCraftBlockData().getMaterial();
+                if (configuredMaterials.contains(mat.name())) {
+                    sensitiveStates[i] = true;
                 }
             } catch (Exception exception) {
                 failedStates++;

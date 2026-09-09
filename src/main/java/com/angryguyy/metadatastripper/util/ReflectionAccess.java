@@ -43,6 +43,10 @@ public final class ReflectionAccess {
      *                              or if it exists but its type violates the expected signature
      */
     public static Field findField(Class<?> owner, String name, Class<?> type) throws NoSuchFieldException {
+        if (owner == null || type == null) {
+            throw new IllegalArgumentException("Owner and type cannot be null");
+        }
+
         Class<?> current = owner;
 
         while (current != null && current != Object.class) {
@@ -80,6 +84,10 @@ public final class ReflectionAccess {
      *                              making a safe resolution impossible
      */
     public static Field findUniqueField(Class<?> owner, Class<?> type) throws NoSuchFieldException {
+        if (owner == null || type == null) {
+            throw new IllegalArgumentException("Owner and type cannot be null");
+        }
+
         List<Field> candidates = new ArrayList<>();
         Class<?> current = owner;
 
@@ -97,7 +105,7 @@ public final class ReflectionAccess {
                     + " but found " + candidates.size());
         }
 
-        Field field = candidates.get(0);
+        Field field = candidates.getFirst();
         field.setAccessible(true);
         return field;
     }

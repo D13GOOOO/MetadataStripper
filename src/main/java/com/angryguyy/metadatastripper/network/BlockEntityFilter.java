@@ -2,7 +2,6 @@ package com.angryguyy.metadatastripper.network;
 
 import com.angryguyy.metadatastripper.MetadataStripper;
 import net.minecraft.core.BlockPos;
-import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import org.bukkit.entity.Player;
 
@@ -64,20 +63,6 @@ public final class BlockEntityFilter {
      */
     private BlockEntityFilter() {
         throw new UnsupportedOperationException("Utility class cannot be instantiated.");
-    }
-
-    /**
-     * Evaluates whether a Block Entity data packet should be dropped based on spatial constraints.
-     * <p>
-     * Intercepts NBT payloads directly on the Netty pipeline, shielding the client from receiving
-     * sensitive data of out-of-reach block entities.
-     *
-     * @param player the recipient player bound to the network channel
-     * @param packet the outbound NMS NBT data packet
-     * @return {@code true} if the packet is deemed out-of-bounds and must be destroyed; {@code false} if it should pass
-     */
-    public static boolean shouldBlock(Player player, ClientboundBlockEntityDataPacket packet) {
-        return shouldBlock(player.getUniqueId(), packet.getType(), packet.getPos());
     }
 
     /**
