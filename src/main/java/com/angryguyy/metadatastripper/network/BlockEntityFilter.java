@@ -4,7 +4,6 @@ import com.angryguyy.metadatastripper.MetadataStripper;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.world.level.block.entity.BlockEntityType;
-import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.entity.Player;
 
 import java.util.Map;
@@ -13,7 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * High-performance, Zero-GC evaluator for Block Entity network payloads.
+ * High-performance evaluator for block entity network payloads.
  * <p>
  * Defeats Stash Finder, City ESP, and Auto Sign modules by dropping NBT data packets
  * for containers and signs that are outside of a legitimate 8-block interaction range.
@@ -24,6 +23,7 @@ public final class BlockEntityFilter {
     private static final double MAX_DISTANCE_SQ = 64.0;
 
     private static final Map<UUID, AtomicInteger> PROFILES = new ConcurrentHashMap<>();
+    private static final Map<UUID, Position> POSITIONS = new ConcurrentHashMap<>();
 
     private BlockEntityFilter() {
         throw new UnsupportedOperationException("Utility class cannot be instantiated.");
@@ -39,29 +39,39 @@ public final class BlockEntityFilter {
      * @return true if the packet should be intercepted and destroyed, false otherwise
      */
     public static boolean shouldBlock(Player player, ClientboundBlockEntityDataPacket packet) {
-        if (!isSensitive(packet.getType())) {
+        return shouldBlock(player.getUniqueId(), packet.getType(), packet.getPos());
+    }
+
+    /**
+     * Evaluates a block entity packet using the last region-thread position snapshot.
+     *
+     * @param playerUuid recipient player identifier
+     * @param type block entity type carried by the packet
+     * @param pos block entity position
+     * @return true when the packet must be discarded
+     */
+    public static boolean shouldBlock(UUID playerUuid, BlockEntityType<?> type, BlockPos pos) {
+        if (!isSensitive(type)) {
             return false;
         }
 
-        BlockPos pos = packet.getPos();
+        Position position = POSITIONS.get(playerUuid);
+        if (position == null) {
+            return false;
+        }
 
-        double px = ((CraftPlayer) player).getHandle().getX();
-        double py = ((CraftPlayer) player).getHandle().getY();
-        double pz = ((CraftPlayer) player).getHandle().getZ();
-
-        double dx = px - pos.getX();
-        double dy = py - pos.getY();
-        double dz = pz - pos.getZ();
+        double dx = position.x - pos.getX();
+        double dy = position.y - pos.getY();
+        double dz = position.z - pos.getZ();
 
         if ((dx * dx + dy * dy + dz * dz) > MAX_DISTANCE_SQ) {
             MetadataStripper.interceptedNbtPackets.incrementAndGet();
 
-            UUID uuid = player.getUniqueId();
-            AtomicInteger profile = PROFILES.get(uuid);
+            AtomicInteger profile = PROFILES.get(playerUuid);
 
             if (profile == null) {
                 AtomicInteger newProfile = new AtomicInteger(0);
-                AtomicInteger existing = PROFILES.putIfAbsent(uuid, newProfile);
+                AtomicInteger existing = PROFILES.putIfAbsent(playerUuid, newProfile);
                 profile = existing != null ? existing : newProfile;
             }
 
@@ -71,6 +81,16 @@ public final class BlockEntityFilter {
         }
 
         return false;
+    }
+
+    /**
+     * Publishes a player position for lock-free packet filtering.
+     *
+     * @param player player whose position is read on its owning region thread
+     */
+    public static void updatePosition(Player player) {
+        net.minecraft.server.level.ServerPlayer handle = ((org.bukkit.craftbukkit.entity.CraftPlayer) player).getHandle();
+        POSITIONS.put(player.getUniqueId(), new Position(handle.getX(), handle.getY(), handle.getZ()));
     }
 
     /**
@@ -92,6 +112,7 @@ public final class BlockEntityFilter {
      */
     public static void removeProfile(UUID uuid) {
         PROFILES.remove(uuid);
+        POSITIONS.remove(uuid);
     }
 
     /**
@@ -111,5 +132,8 @@ public final class BlockEntityFilter {
                 type == BlockEntityType.MOB_SPAWNER ||
                 type == BlockEntityType.VAULT ||
                 type == BlockEntityType.DECORATED_POT;
+    }
+
+    private record Position(double x, double y, double z) {
     }
 }

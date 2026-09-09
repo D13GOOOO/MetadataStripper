@@ -21,11 +21,17 @@ import org.bukkit.event.player.PlayerQuitEvent;
  * <p>
  * <b>Algorithmic Complexity:</b>
  * <ul>
- *   <li><b>Memory Allocation:</b> Zero-GC footprint beyond the single packet instantiation.</li>
+ *   <li><b>Memory Allocation:</b> One removal packet plus the allocations required by the Bukkit and NMS APIs.</li>
  *   <li><b>Execution Time:</b> O(P) where P is the number of active players in the quitting player's world, using lightning-fast reference equality checks.</li>
  * </ul>
  */
 public final class PlayerQuitListener implements Listener {
+
+    /**
+     * Creates the disconnect cleanup listener.
+     */
+    public PlayerQuitListener() {
+    }
 
     /**
      * Intercepts player disconnections at the HIGHEST priority to broadcast instantaneous

@@ -1,118 +1,114 @@
 # MetadataStripper
 
-MetadataStripper is an enterprise-grade, high-performance, zero-garbage-collection (Zero-GC) anti-xray and anti-cheat plugin designed for modern high-capacity Minecraft servers running Paper and Folia.
+MetadataStripper is a Paper/Folia 1.21.1 plugin that reduces client-side x-ray, chunk-finder, stash-finder, and entity-ESP exposure by sanitizing outbound block, block entity, and entity packets.
 
-By leveraging low-level Netty pipeline manipulation, deep memory cloning, primitive bitsets, and thread-local buffer reuse, MetadataStripper bypasses traditional high-overhead plugin loops, ensuring constant-time (O(1)) and logarithmic-time (O(log N)) performance, eliminating lag spikes caused by garbage collection during heavy chunk loading and player movement.
+The plugin is designed for production servers where packet protection must coexist with normal exploration and mining. It uses a Netty outbound handler, immutable lookup snapshots, Paper/Folia schedulers, bounded proximity scans, and packet-local chunk copies.
 
----
+## Compatibility
 
-## Architecture and Design Philosophy
+- Paper 1.21.1
+- Folia 1.21.1
+- Java 21 or newer
+- Other forks are unsupported unless they preserve the Paper 1.21.1 NMS layout
 
-Traditional anti-xray plugins frequently rely on dynamic maps, frequent object allocations, and synchronous task scheduling, which degrades server performance under heavy player loads. MetadataStripper is built on a radically different architectural model:
+The implementation uses internal NMS classes, reflection, and `Unsafe`. A Minecraft minor-version change can require a new build and should not be assumed compatible.
 
-1. **Deep Binary Injection & Unsafe Cloning:** Bypasses Minecraft 1.21.1's asynchronous chunk serialization race conditions and strict registry protections. It utilizes `sun.misc.Unsafe` to physically clone `LevelChunkSection` structures in memory without invoking native constructors (preventing `NoSuchMethodError` crashes) and injects the mutated `ClientboundLevelChunkPacketData` directly into the outbound Netty pipeline.
-2. **Zero-GC Primitive Routing:** Sensitive block mappings are pre-calculated during server startup into a native primitive boolean array (`boolean[]`) and bit-vector `EnumSet`s. Netty pipeline interceptors evaluate block states via direct array indexing, achieving nanosecond-level execution times.
-3. **ThreadLocal Buffer Reuse:** Chunk modification packets utilize thread-local buffer arrays (`ThreadLocal<short[]>` and `ThreadLocal<BlockState[]>`). This prevents memory churn across concurrent Netty event loop threads during mass chunk serialization.
-4. **Lock-Free Spatial Engine:** Fully decoupled from legacy synchronous tasks. Entity proximities are pre-computed as primitive `int[]` arrays on Folia's regional threads. Netty I/O threads perform instantaneous O(log N) binary searches on these arrays to filter metadata safely without triggering Folia's AsyncCatcher.
+## Protection Model
 
----
+### Chunk protection
 
-## Core Features
+Outbound chunk packets are processed in the recipient player's Paper or Folia execution context. Each section is scanned first; only sections containing configured sensitive blocks, underground fluids, or bedrock changes are copied and rewritten. Unmodified sections are reused.
 
-- **Zero-Trust Chunk Obfuscation:** Aggressively obfuscates all configured valuable ores, containers, spawners, and **underground liquids (Y < 55)** directly at the byte level before serialization. Completely neutralizes Freecam and BlockESP by ensuring the client physically never receives the original block data.
-- **Dual-Mode Proximity & Raytrace Radar:** A highly optimized, Zero-GC `PlayerMoveEvent` listener acts as a local radar. It combines a spherical 5-block radius scan (evaluated on block shifts) with an **occlusion-culled Line-of-Sight (LoS) raytracing algorithm**. This dynamically reveals obfuscated blocks to legitimate exploring players, allowing them to safely see deep ravine bottoms (e.g., for MLG water drops) without exposing ores hidden behind solid walls.
-- **Instant Excavation Revealer:** Seamlessly ties into the block-breaking mechanics. Upon breaking a block, the six adjacent faces are instantly updated via the native Bukkit API (`sendBlockChange`), bypassing Netty overhead and ensuring fluid mining for legitimate players.
-- **Subterranean Culling & Bedrock Preservation:** Selectively fills subterranean air spaces (Y < 5) with uniform deepslate to neutralize cave-finder exploits, while mathematically identifying and preserving the natural bedrock boundaries to prevent visual glitches.
-- **Anti-Seed Cracker:** Flattens deterministic world generation patterns by stripping auxiliary metadata (crop growth stages, waterlogged flags, block orientations, leaf distances) and normalizing exposed bedrock coordinates to prevent automated world seed reverse-engineering.
-- **Zero-GC Entity Data Culling:** Dynamically drops sensitive entity metadata and equipment packets (defeating Armor Buster, Pop Chams, and Owner ESP) for entities outside a tactical engagement radius. Operates natively on Netty threads to prevent visual entity flickering.
-- **Logout Ghost Entity Purge:** Instead of modifying disconnecting players' native NMS altitude coordinates (which corrupts persistent Folia chunk saves), it instantly broadcasts a surgical `ClientboundRemoveEntitiesPacket` to all viewers. This completely purges the ghost entity from tracking client modules, destroying ambush coordinates.
+The embedded block entity list is filtered as part of the chunk payload. Sensitive block entity data outside the configured interaction radius is removed before serialization. If the regional transformation fails or exceeds its bounded wait, the original packet is forwarded and the failure is logged.
 
----
+### Block state sanitization
 
-## Requirements
+The startup cache normalizes selected deterministic block-state properties, including crop stages, waterlogged state, leaf distance, snow layers, moisture, pickle count, and selected orientations. Lookup is constant-time after initialization and does not intentionally allocate per lookup.
 
-- **Server Software:** Paper, Folia, or compatible forks (API version 1.21+).
-- **Java Runtime:** Java 21 or higher.
+### Legitimate visibility
 
----
+The proximity revealer restores configured blocks and underground fluids within a five-block radius and along a line-of-sight ray up to 45 blocks. A full scan is used on first entry, teleport, or world change. Normal one-block movement scans only the newly entered shell of the radius.
+
+Block-break events also refresh the six adjacent block faces for the player who performed the break.
+
+### Entity protection
+
+Entity metadata and equipment packets are filtered against a 32-block tactical radius. Visibility snapshots are calculated on the player's owning region thread and read by the packet filter through a lock-free map. Before the first snapshot is available, packets pass through to avoid incomplete entity initialization.
+
+### Disconnect cleanup
+
+When a player quits, the plugin sends an entity removal packet to viewers in the same world and removes player-local packet, position, and visibility snapshots.
 
 ## Installation
 
-1. Place the `MetadataStripper.jar` file into your server's `plugins` directory.
-2. Start or restart the server to generate the default configuration file (`config.yml`).
-3. Modify the configuration to match your server's target block profiles.
-4. Execute `/ms reload` to apply configuration updates live without disconnecting active clients.
+1. Build or obtain the release jar for Paper/Folia 1.21.1.
+2. Place the jar in the server `plugins` directory.
+3. Start the server once to create `config.yml`.
+4. Set `client-name` and `license-key` in `config.yml`.
+5. Configure `engine-mode`, `alert-threshold`, and `sensitive-blocks`.
+6. Restart the server, or run `/ms reload` after changing the configuration.
 
----
+The license values are required by the current build. The local key validator is an installation gate, not a remote licensing service or a substitute for server-side access control.
 
-## Configuration (`config.yml`)
+## Configuration
 
-```yaml
-# ========================================== #
-#     MetadataStripper - Configuration       #
-# ========================================== #
+The complete maintained configuration is in `src/main/resources/config.yml` and is copied to the server on first startup.
 
-# Operational Engine Mode:
-# 2 = Full Aggressive (Ores + Containers + Cave Filling + Anti-Seed Cracker)
-# 1 = Lightweight (Ores + Containers + Anti-Seed Cracker, skips heavy cave filling)
-engine-mode: 2
+### Engine mode
 
-# Profiler Alert Threshold (Stash Finder Detection):
-# Triggers a silent staff alert if a player intercepts more than this many NBT packets in 60 seconds.
-alert-threshold: 5000
+- `1`: sensitive block protection, block entity filtering, state sanitization, entity filtering, and anti-seed state normalization.
+- `2`: mode 1 plus the aggressive subterranean fill behavior below Y=5.
 
-# Exact list of Bukkit materials to obfuscate and protect
-sensitive-blocks:
-  - DIAMOND_ORE
-  - DEEPSLATE_DIAMOND_ORE
-  - GOLD_ORE
-  - DEEPSLATE_GOLD_ORE
-  - IRON_ORE
-  - DEEPSLATE_IRON_ORE
-  - COPPER_ORE
-  - DEEPSLATE_COPPER_ORE
-  - EMERALD_ORE
-  - DEEPSLATE_EMERALD_ORE
-  - LAPIS_ORE
-  - DEEPSLATE_LAPIS_ORE
-  - COAL_ORE
-  - DEEPSLATE_COAL_ORE
-  - REDSTONE_ORE
-  - DEEPSLATE_REDSTONE_ORE
-  - NETHER_QUARTZ_ORE
-  - NETHER_GOLD_ORE
-  - ANCIENT_DEBRIS
-  - AMETHYST_BLOCK
-  - BUDDING_AMETHYST
-  - CHEST
-  - TRAPPED_CHEST
-  - BARREL
-  - ENDER_CHEST
-  - SPAWNER
-  - TRIAL_SPAWNER
-  - VAULT
-  - HEAVY_CORE
-  - DECORATED_POT
-```
+The engine automatically falls back from mode 2 to mode 1 when the first reported TPS value is below 18.5. This fallback affects the active packet transformation only; it does not rewrite the configured mode.
+
+### Sensitive blocks
+
+`sensitive-blocks` is a list of Bukkit `Material` names. The list is used both by chunk obfuscation and by the legitimate-visibility revealer. Invalid material names are ignored during parsing. The default file includes ores, containers, trial chamber materials, mineshaft materials, stronghold materials, amethyst, sculk, and dripstone blocks.
+
+### Alert threshold
+
+`alert-threshold` controls the number of blocked block entity payloads counted for a player during each 60-second reporting interval. Matching players generate an alert for online staff with `metadatastripper.admin`.
 
 ## Commands and Permissions
 
 ### Commands
-- `/ms` - Displays real-time engine telemetry, including destroyed NBT packets, blocked entity data payloads, and total culled entities.
-- `/ms reload` - Triggers a live hot-reload of configuration settings and internal lookup tables without uninjecting connected clients.
+
+- `/ms`: displays packet counters and the active regional packet pipeline status.
+- `/ms reload`: reloads the configuration, atomically replaces the sensitive block table, and updates the proximity revealer without reinjecting player channels.
 
 ### Permissions
-- `metadatastripper.admin` - Grants access to administrative commands (`/ms` and `/ms reload`) and enables receipt of automated silent exploit profiler alerts.
-- `metadatastripper.bypass` - Completely bypasses all Netty packet obfuscation, spatial culling, and entity visibility restrictions for trusted staff members.
 
----
+- `metadatastripper.admin`: access to `/ms` and staff alerts.
+- `metadatastripper.bypass`: bypasses packet obfuscation, block reveals, and entity restrictions for trusted staff.
 
-## Technical Specifications
+## Performance Characteristics
 
-| Component | Execution Context | Algorithmic Complexity | Memory Allocation |
-| :--- | :--- | :--- | :--- |
-| **Block State Sanitization** | Async Startup / Netty Write | O(1) Array Indexing | Zero-GC (Static Array) |
-| **Binary Chunk Obfuscation** | Netty EventLoop Thread | O(N) Section Scan | Low-GC (`Unsafe.allocateInstance`) |
-| **Dynamic Proximity Radar**| Main/Region Spigot Thread | O(1) EnumSet Lookup | Zero-GC (Bit-Vector) |
-| **Entity Metadata Culling** | Netty / Region Scheduler | O(log N) Binary Search | Zero-GC (Primitive Arrays) |
-| **Stash Finder Profiler** | Netty Pipeline / 60s Task | O(1) Concurrent Map | Zero-GC (Atomic Counters) |
+| Component | Execution context | Cost profile |
+| --- | --- | --- |
+| Block-state cache | Startup and packet handling | O(1) array lookup after O(N) startup build |
+| Chunk transformation | Player region scheduler | O(N) scan of non-empty sections; copies only modified sections |
+| Block entity filtering | Regional snapshot plus outbound packet path | O(1) type/distance checks |
+| Proximity revealer | Player region thread | Full O(11^3) scan only when required; shell scan for one-block movement |
+| Entity culling | Global dispatch plus player region | O(E log E) per snapshot because visible IDs are sorted |
+| Violation profiler | Global scheduler | O(P) online-player scan every 60 seconds |
+
+The plugin is not literally zero-GC. It deliberately creates bounded arrays, packet copies, scheduler tasks, and Bukkit block update objects where required by the Paper/Folia APIs. The implementation minimizes unnecessary allocations but does not claim to eliminate garbage collection.
+
+## Operational Notes
+
+- The plugin protects outbound data; it is not a complete server anti-cheat.
+- Packet-level obfuscation can interact with other packet manipulation plugins. Test ordering and bypass permissions on the target server.
+- The Netty handler uses a bounded two-second wait when a chunk or block update must be transformed on the player scheduler. Repeated timeout logs indicate a scheduler or server health problem.
+- Reloading changes future packet processing. Clients may need a chunk refresh, movement, or reconnect to receive every newly configured visual rule.
+- Test Paper and Folia separately before deployment. Their scheduler models differ even though the plugin supports both.
+
+## Build and Verification
+
+From the project root:
+
+```text
+gradlew.bat clean build
+gradlew.bat javadoc
+```
+
+The release target is the jar produced under `build/libs`. Before distribution, verify startup, reload, login/logout, teleport, chunk loading, block breaking, entity visibility, and server shutdown on the exact Paper/Folia build that will be supported.

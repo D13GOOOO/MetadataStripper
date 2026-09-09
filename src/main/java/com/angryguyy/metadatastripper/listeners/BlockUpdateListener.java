@@ -9,7 +9,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 
 /**
- * A Zero-GC, high-performance listener responsible for dynamically revealing obfuscated blocks.
+ * A bounded-overhead listener responsible for dynamically revealing obfuscated blocks.
  * <p>
  * When a player breaks a block, this class immediately forces a block state update for the
  * six adjacent faces. Since single-block updates deliberately bypass the aggressive chunk
@@ -18,11 +18,17 @@ import org.bukkit.event.block.BlockBreakEvent;
  * <p>
  * <b>Algorithmic Complexity:</b>
  * <ul>
- *   <li><b>Memory Allocation:</b> Zero-GC footprint. Relies on a pre-computed static array.</li>
+ *   <li><b>Memory Allocation:</b> Uses a pre-computed static face array and the Bukkit block update API.</li>
  *   <li><b>Execution Time:</b> O(1) constant time execution per block break event.</li>
  * </ul>
  */
 public final class BlockUpdateListener implements Listener {
+
+    /**
+     * Creates the block-break reveal listener.
+     */
+    public BlockUpdateListener() {
+    }
 
     /**
      * Pre-allocated static array containing the six cardinal block faces.

@@ -7,7 +7,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 
 /**
- * A highly optimized, Zero-GC cache mechanism for sanitizing native Mojang {@link BlockState} instances.
+ * A startup-built cache for sanitizing native Mojang {@link BlockState} instances.
  * <p>
  * This cache intercepts and cleanses sensitive block metadata that could be exploited by unauthorized
  * client-side modifications, such as chunk finders, growth-tracking ESPs, and world seed crackers.
@@ -16,8 +16,8 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
  * <p>
  * <b>Algorithmic Complexity:</b>
  * <ul>
- *   <li><b>Initialization:</b> O(N) where N is the total block state registry size. Executed asynchronously once during server startup.</li>
- *   <li><b>Lookup:</b> O(1) direct array indexing. Guarantees nanosecond-level access times during Netty packet interception loops, ensuring zero main-thread impact.</li>
+ *   <li><b>Initialization:</b> O(N) where N is the total block state registry size. Executed synchronously during plugin startup.</li>
+ *   <li><b>Lookup:</b> O(1) direct array indexing with no intentional per-lookup allocation.</li>
  * </ul>
  */
 public final class BlockStateCache {
@@ -56,8 +56,7 @@ public final class BlockStateCache {
     /**
      * Retrieves the sanitized, mathematically flattened equivalent of a given block state.
      * <p>
-     * Evaluates instantaneously using a pre-computed array indexed by the native NMS Block ID,
-     * bypassing object allocation and garbage collection entirely.
+    * Evaluates using a pre-computed array indexed by the native NMS Block ID.
      *
      * @param state the original, potentially sensitive native block state
      * @return the normalized block state, or the original state if no sanitization is required

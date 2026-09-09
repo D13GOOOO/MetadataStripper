@@ -6,7 +6,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import org.bukkit.World.Environment;
 
 /**
- * A highly optimized, Zero-GC deterministic palette generator for subterranean visual obfuscation.
+ * A deterministic palette generator for subterranean visual obfuscation.
  * <p>
  * Responsible for mapping hidden coordinates into clean, uniform background block states
  * (Stone, Deepslate, Netherrack, or End Stone) depending on the dimensional environment and altitude.

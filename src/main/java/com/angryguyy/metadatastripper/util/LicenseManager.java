@@ -45,8 +45,7 @@ public final class LicenseManager {
 
     /**
      * Utility method to generate the valid license key for a given client.
-     * Puoi usare questo metodo in un piccolo script locale (o un comando di test)
-     * per ricavare la chiave da mandare all'acquirente.
+    * The method can be used by a license provisioning tool to generate the key delivered to a customer.
      *
      * @param clientName the username or identifier of the buyer
      * @return the unique cryptographic license key

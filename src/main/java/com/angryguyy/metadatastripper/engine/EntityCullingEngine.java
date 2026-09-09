@@ -1,6 +1,7 @@
 package com.angryguyy.metadatastripper.engine;
 
 import com.angryguyy.metadatastripper.util.RegionSchedulerAdapter;
+import com.angryguyy.metadatastripper.network.BlockEntityFilter;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
@@ -10,14 +11,12 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 
 /**
  * High-performance spatial entity culling engine designed for Folia and Paper.
  * <p>
- * Manages asynchronous and regional task delegation to eliminate main-thread lag.
- * Computes visibility maps and exposes an O(log N) lock-free read path
- * for the Netty I/O threads using primitive arrays to guarantee Zero-GC footprint.
+ * Manages global dispatch and regional task delegation. It computes visibility snapshots
+ * on the owning player region and exposes an O(log N) read path for packet filtering.
  */
 public final class EntityCullingEngine {
 
@@ -38,15 +37,14 @@ public final class EntityCullingEngine {
         if (isRunning) return;
         isRunning = true;
 
-        Bukkit.getAsyncScheduler().runAtFixedRate(plugin, task -> {
+        RegionSchedulerAdapter.scheduleGlobalRepeating(plugin, () -> {
             if (!isRunning) {
-                task.cancel();
                 return;
             }
             for (Player player : Bukkit.getOnlinePlayers()) {
                 dispatchPlayerCulling(plugin, player);
             }
-        }, 0L, 100L, TimeUnit.MILLISECONDS);
+        }, 1L, 5L);
     }
 
     /**
@@ -79,6 +77,7 @@ public final class EntityCullingEngine {
             return;
         }
 
+        BlockEntityFilter.updatePosition(player);
         List<Entity> nearbyEntities = player.getNearbyEntities(TACTICAL_RADIUS, TACTICAL_RADIUS, TACTICAL_RADIUS);
         int[] visibleIds = new int[nearbyEntities.size()];
 
@@ -100,7 +99,10 @@ public final class EntityCullingEngine {
      */
     public static boolean isEntityVisible(UUID playerUuid, int entityId) {
         int[] visibleIds = VISIBILITY_MAP.get(playerUuid);
-        if (visibleIds == null || visibleIds.length == 0) {
+        if (visibleIds == null) {
+            return true;
+        }
+        if (visibleIds.length == 0) {
             return false;
         }
         return Arrays.binarySearch(visibleIds, entityId) >= 0;

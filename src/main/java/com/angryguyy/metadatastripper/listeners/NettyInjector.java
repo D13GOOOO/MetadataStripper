@@ -2,7 +2,9 @@ package com.angryguyy.metadatastripper.listeners;
 
 import com.angryguyy.metadatastripper.MetadataStripper;
 import com.angryguyy.metadatastripper.cache.BlockStateCache;
+import com.angryguyy.metadatastripper.network.BlockEntityFilter;
 import com.angryguyy.metadatastripper.util.ObfuscationPalette;
+import com.angryguyy.metadatastripper.util.RegionSchedulerAdapter;
 
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelDuplexHandler;
@@ -30,13 +32,22 @@ import sun.misc.Unsafe;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
- * Core network interceptor for applying hardware-level packet obfuscation.
+ * Core network interceptor for applying packet-level obfuscation.
  * <p>
  * This class injects a custom duplex handler into the Netty pipeline of each connected player.
  * It strictly intercepts and mutates chunk data and block updates before serialization, effectively
- * nullifying X-Ray mods, Cave ESPs, and Sus Chunk Finders without inducing main-thread latency.
+ * nullifying X-Ray mods, Cave ESPs, and Sus Chunk Finders while delegating NMS chunk access to
+ * the recipient player's Paper or Folia scheduler.
  * <p>
  * <b>Algorithmic Optimizations:</b>
  * <ul>
@@ -54,6 +65,11 @@ public final class NettyInjector implements Listener {
     private static Field[] levelChunkSectionFields;
     private static Method palettedContainerCopy;
     private static Field chunkAccessSectionsField;
+    private static Field blockEntitiesDataField;
+    private static Field blockEntityPackedXZField;
+    private static Field blockEntityYField;
+    private static Field blockEntityTypeField;
+    private static Throwable initializationFailure;
 
     static {
         try {
@@ -84,22 +100,60 @@ public final class NettyInjector implements Listener {
                     break;
                 }
             }
-        } catch (Exception ignored) {}
+
+            for (Field f : ClientboundLevelChunkPacketData.class.getDeclaredFields()) {
+                if (List.class.isAssignableFrom(f.getType())) {
+                    f.setAccessible(true);
+                    blockEntitiesDataField = f;
+                    break;
+                }
+            }
+
+            Class<?> blockEntityInfoClass = Class.forName(
+                    "net.minecraft.network.protocol.game.ClientboundLevelChunkPacketData$BlockEntityInfo");
+            blockEntityPackedXZField = blockEntityInfoClass.getDeclaredField("packedXZ");
+            blockEntityYField = blockEntityInfoClass.getDeclaredField("y");
+            blockEntityTypeField = blockEntityInfoClass.getDeclaredField("type");
+            blockEntityPackedXZField.setAccessible(true);
+            blockEntityYField.setAccessible(true);
+            blockEntityTypeField.setAccessible(true);
+        } catch (Exception exception) {
+            initializationFailure = exception;
+        }
     }
 
     private final MetadataStripper plugin;
+    private final Map<UUID, Boolean> bypassPlayers = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> playerEntityIds = new ConcurrentHashMap<>();
 
+    /**
+     * Creates an injector bound to the plugin lifecycle and logger.
+     *
+     * @param plugin owning plugin instance
+     */
     public NettyInjector(MetadataStripper plugin) {
         this.plugin = plugin;
+        if (initializationFailure != null) {
+            plugin.getLogger().log(java.util.logging.Level.WARNING,
+                    "Netty packet interception is partially unavailable", initializationFailure);
+        }
     }
 
-    @SuppressWarnings("unused")
+    /**
+     * Injects the outbound handler when a player joins.
+     *
+     * @param event player join event
+     */
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         injectPlayer(event.getPlayer());
     }
 
-    @SuppressWarnings("unused")
+    /**
+     * Removes the outbound handler when a player quits.
+     *
+     * @param event player quit event
+     */
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         removePlayer(event.getPlayer());
@@ -112,6 +166,9 @@ public final class NettyInjector implements Listener {
      */
     public void injectPlayer(Player player) {
         try {
+            UUID playerUuid = player.getUniqueId();
+            bypassPlayers.put(playerUuid, player.hasPermission("metadatastripper.bypass"));
+            playerEntityIds.put(playerUuid, player.getEntityId());
             Channel channel = ((CraftPlayer) player).getHandle().connection.connection.channel;
             if (channel.pipeline().get(HANDLER_NAME) != null) {
                 channel.pipeline().remove(HANDLER_NAME);
@@ -121,7 +178,7 @@ public final class NettyInjector implements Listener {
                 @Override
                 public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
                     try {
-                        msg = handlePacket(player, msg);
+                        msg = handlePacket(player, playerUuid, msg);
                         if (msg == null) {
                             return;
                         }
@@ -131,7 +188,10 @@ public final class NettyInjector implements Listener {
                     super.write(ctx, msg, promise);
                 }
             });
-        } catch (Exception ignored) {}
+        } catch (Exception exception) {
+            plugin.getLogger().log(java.util.logging.Level.WARNING,
+                "Unable to inject MetadataStripper into player channel", exception);
+        }
     }
 
     /**
@@ -142,10 +202,29 @@ public final class NettyInjector implements Listener {
      * @return the mutated packet, or null if the packet should be dropped
      */
     @SuppressWarnings({"unused", "deprecation"})
-    private Object handlePacket(Player player, Object msg) {
-        if (player.hasPermission("metadatastripper.bypass")) {
+    private Object handlePacket(Player player, UUID playerUuid, Object msg) throws InterruptedException, ExecutionException, TimeoutException {
+        if (Boolean.TRUE.equals(bypassPlayers.get(playerUuid))) {
             return msg;
         }
+
+        if (msg instanceof ClientboundBlockUpdatePacket || msg instanceof ClientboundLevelChunkWithLightPacket) {
+            return RegionSchedulerAdapter.callForEntity(plugin, player, () -> handleRegionPacket(player, msg), 2L, TimeUnit.SECONDS);
+        }
+
+        if (msg instanceof ClientboundBlockEntityDataPacket packet && BlockEntityFilter.shouldBlock(playerUuid, packet.getType(), packet.getPos())) {
+            return null;
+        }
+        if (msg instanceof ClientboundSetEntityDataPacket packet && com.angryguyy.metadatastripper.network.EntityDataFilter.shouldBlock(playerUuid, playerEntityIds.getOrDefault(playerUuid, -1), packet.id())) {
+            return null;
+        }
+        if (msg instanceof ClientboundSetEquipmentPacket packet && com.angryguyy.metadatastripper.network.EntityDataFilter.shouldBlock(playerUuid, playerEntityIds.getOrDefault(playerUuid, -1), packet.getEntity())) {
+            return null;
+        }
+        return msg;
+    }
+
+    private Object handleRegionPacket(Player player, Object msg) {
+        BlockEntityFilter.updatePosition(player);
 
         if (msg instanceof ClientboundBlockUpdatePacket packet) {
             Level level = ((CraftPlayer) player).getHandle().level();
@@ -159,16 +238,7 @@ public final class NettyInjector implements Listener {
                 return new ClientboundBlockUpdatePacket(packet.getPos(), sanitized);
             }
         }
-        else if (msg instanceof ClientboundBlockEntityDataPacket packet && com.angryguyy.metadatastripper.network.BlockEntityFilter.shouldBlock(player, packet)) {
-            return null;
-        }
-        else if (msg instanceof ClientboundSetEntityDataPacket packet && com.angryguyy.metadatastripper.network.EntityDataFilter.shouldBlock(player, packet.id())) {
-            return null;
-        }
-        else if (msg instanceof ClientboundSetEquipmentPacket packet && com.angryguyy.metadatastripper.network.EntityDataFilter.shouldBlock(player, packet.getEntity())) {
-            return null;
-        }
-        else if (msg instanceof ClientboundLevelChunkWithLightPacket chunkPacket) {
+        if (msg instanceof ClientboundLevelChunkWithLightPacket chunkPacket) {
             if (chunkDataField == null || chunkAccessSectionsField == null || unsafe == null) {
                 return msg;
             }
@@ -188,6 +258,7 @@ public final class NettyInjector implements Listener {
             BlockState stone = ObfuscationPalette.getObfuscatedBlock(engineMode, new BlockPos(0, 1, 0), env);
             BlockState deepslate = ObfuscationPalette.getObfuscatedBlock(engineMode, new BlockPos(0, -1, 0), env);
             int minBuildHeight = player.getWorld().getMinHeight();
+            boolean[] sensitiveStates = MetadataStripper.sensitiveGlobal;
 
             try {
                 LevelChunkSection[] originalSections = chunk.getSections();
@@ -205,32 +276,9 @@ public final class NettyInjector implements Listener {
                     int globalSectionY = sectionY << 4;
                     boolean isUnderground = globalSectionY < AGGRESSIVE_Y_MAX;
 
-                    LevelChunkSection fakeSection = (LevelChunkSection) unsafe.allocateInstance(LevelChunkSection.class);
-                    for (Field f : levelChunkSectionFields) {
-                        if (Modifier.isStatic(f.getModifiers())) continue;
-                        Object val = f.get(section);
-
-                        if (val != null && val.getClass() == net.minecraft.world.level.chunk.PalettedContainer.class) {
-                            val = palettedContainerCopy.invoke(val);
-                        }
-                        f.set(fakeSection, val);
-                    }
-
                     boolean sectionModified = false;
 
                     if (isUnderground && isAggressiveMode) {
-                        for (int y = 0; y < 16; y++) {
-                            for (int x = 0; x < 16; x++) {
-                                for (int z = 0; z < 16; z++) {
-                                    BlockState originalState = section.getBlockState(x, y, z);
-                                    if (originalState.getBlock() == Blocks.BEDROCK) {
-                                        fakeSection.setBlockState(x, y, z, originalState);
-                                    } else {
-                                        fakeSection.setBlockState(x, y, z, deepslate);
-                                    }
-                                }
-                            }
-                        }
                         sectionModified = true;
                     } else {
                         for (int y = 0; y < 16; y++) {
@@ -243,14 +291,12 @@ public final class NettyInjector implements Listener {
                                     BlockState state = section.getBlockState(x, y, z);
                                     int id = Block.getId(state);
 
-                                    boolean isSensitive = id >= 0 && id < MetadataStripper.sensitiveGlobal.length && MetadataStripper.sensitiveGlobal[id];
+                                    boolean isSensitive = id >= 0 && id < sensitiveStates.length && sensitiveStates[id];
                                     boolean isUndergroundLiquid = checkLiquid && !state.getFluidState().isEmpty();
 
                                     if (isSensitive || isUndergroundLiquid) {
-                                        fakeSection.setBlockState(x, y, z, replacement);
                                         sectionModified = true;
                                     } else if (state.getBlock() == Blocks.BEDROCK && actualY > minBuildHeight) {
-                                        fakeSection.setBlockState(x, y, z, replacement);
                                         sectionModified = true;
                                     }
                                 }
@@ -258,10 +304,56 @@ public final class NettyInjector implements Listener {
                         }
                     }
 
-                    clonedSections[i] = sectionModified ? fakeSection : section;
-                    if (sectionModified) {
-                        chunkModified = true;
+                    if (!sectionModified) {
+                        clonedSections[i] = section;
+                        continue;
                     }
+
+                    LevelChunkSection fakeSection = (LevelChunkSection) unsafe.allocateInstance(LevelChunkSection.class);
+                    for (Field f : levelChunkSectionFields) {
+                        if (Modifier.isStatic(f.getModifiers())) continue;
+                        Object val = f.get(section);
+
+                        if (val != null && val.getClass() == net.minecraft.world.level.chunk.PalettedContainer.class) {
+                            val = palettedContainerCopy.invoke(val);
+                        }
+                        f.set(fakeSection, val);
+                    }
+
+                    if (isUnderground && isAggressiveMode) {
+                        for (int y = 0; y < 16; y++) {
+                            for (int x = 0; x < 16; x++) {
+                                for (int z = 0; z < 16; z++) {
+                                    BlockState originalState = section.getBlockState(x, y, z);
+                                    fakeSection.setBlockState(x, y, z,
+                                            originalState.getBlock() == Blocks.BEDROCK ? originalState : deepslate);
+                                }
+                            }
+                        }
+                    } else {
+                        for (int y = 0; y < 16; y++) {
+                            int actualY = globalSectionY + y;
+                            BlockState replacement = actualY < 0 ? deepslate : stone;
+                            boolean checkLiquid = actualY < 55;
+
+                            for (int x = 0; x < 16; x++) {
+                                for (int z = 0; z < 16; z++) {
+                                    BlockState state = section.getBlockState(x, y, z);
+                                    int id = Block.getId(state);
+                                    boolean isSensitive = id >= 0 && id < sensitiveStates.length && sensitiveStates[id];
+                                    boolean isUndergroundLiquid = checkLiquid && !state.getFluidState().isEmpty();
+
+                                    if (isSensitive || isUndergroundLiquid ||
+                                            (state.getBlock() == Blocks.BEDROCK && actualY > minBuildHeight)) {
+                                        fakeSection.setBlockState(x, y, z, replacement);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    clonedSections[i] = fakeSection;
+                    chunkModified = true;
                 }
 
                 if (chunkModified) {
@@ -280,15 +372,51 @@ public final class NettyInjector implements Listener {
                     chunkAccessSectionsField.set(fakeChunk, clonedSections);
 
                     ClientboundLevelChunkPacketData fakeData = new ClientboundLevelChunkPacketData(fakeChunk);
+                    filterChunkBlockEntities(fakeData, chunkPacket.getX(), chunkPacket.getZ(), player.getUniqueId());
                     chunkDataField.set(chunkPacket, fakeData);
+                } else {
+                    filterChunkBlockEntities(chunkPacket.getChunkData(), chunkPacket.getX(), chunkPacket.getZ(), player.getUniqueId());
                 }
 
-            } catch (Exception ignored) {}
+            } catch (Exception exception) {
+                plugin.getLogger().log(java.util.logging.Level.WARNING,
+                        "Unable to sanitize chunk packet for " + player.getName(), exception);
+            }
 
             return chunkPacket;
         }
 
         return msg;
+    }
+
+    private void filterChunkBlockEntities(ClientboundLevelChunkPacketData chunkData, int chunkX, int chunkZ, UUID playerUuid)
+            throws IllegalAccessException {
+        if (blockEntitiesDataField == null || blockEntityPackedXZField == null || blockEntityYField == null || blockEntityTypeField == null) {
+            return;
+        }
+
+        Object value = blockEntitiesDataField.get(chunkData);
+        if (value instanceof List<?> blockEntities) {
+            Iterator<?> iterator = blockEntities.iterator();
+            while (iterator.hasNext()) {
+                Object blockEntity = iterator.next();
+                int packedXZ = blockEntityPackedXZField.getInt(blockEntity);
+                int y = blockEntityYField.getInt(blockEntity);
+                BlockPos position = new BlockPos((chunkX << 4) + (packedXZ & 15), y, (chunkZ << 4) + ((packedXZ >> 4) & 15));
+                if (BlockEntityFilter.shouldBlock(playerUuid, (net.minecraft.world.level.block.entity.BlockEntityType<?>) blockEntityTypeField.get(blockEntity), position)) {
+                    iterator.remove();
+                }
+            }
+        }
+
+        Iterator<net.minecraft.network.protocol.Packet<?>> extraPackets = chunkData.getExtraPackets().iterator();
+        while (extraPackets.hasNext()) {
+            net.minecraft.network.protocol.Packet<?> extraPacket = extraPackets.next();
+            if (extraPacket instanceof ClientboundBlockEntityDataPacket blockEntityPacket
+                    && BlockEntityFilter.shouldBlock(playerUuid, blockEntityPacket.getType(), blockEntityPacket.getPos())) {
+                extraPackets.remove();
+            }
+        }
     }
 
     private Environment getEnvironmentFast(Level level) {
@@ -307,6 +435,9 @@ public final class NettyInjector implements Listener {
      * @param player the disconnecting player
      */
     public void removePlayer(Player player) {
+        UUID playerUuid = player.getUniqueId();
+        bypassPlayers.remove(playerUuid);
+        playerEntityIds.remove(playerUuid);
         try {
             Channel channel = ((CraftPlayer) player).getHandle().connection.connection.channel;
             channel.eventLoop().execute(() -> {
@@ -314,8 +445,14 @@ public final class NettyInjector implements Listener {
                     if (channel.pipeline().get(HANDLER_NAME) != null) {
                         channel.pipeline().remove(HANDLER_NAME);
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception exception) {
+                    plugin.getLogger().log(java.util.logging.Level.WARNING,
+                            "Unable to remove MetadataStripper channel handler", exception);
+                }
             });
-        } catch (Exception ignored) {}
+        } catch (Exception exception) {
+            plugin.getLogger().log(java.util.logging.Level.WARNING,
+                    "Unable to schedule MetadataStripper channel removal", exception);
+        }
     }
 }

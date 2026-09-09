@@ -1,9 +1,7 @@
 package com.angryguyy.metadatastripper;
 
-import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.bukkit.Bukkit;
@@ -13,12 +11,13 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import com.angryguyy.metadatastripper.commands.AdminCommand;
 import com.angryguyy.metadatastripper.engine.EntityCullingEngine;
+import com.angryguyy.metadatastripper.listeners.BlockUpdateListener;
 import com.angryguyy.metadatastripper.listeners.NettyInjector;
 import com.angryguyy.metadatastripper.listeners.PlayerQuitListener;
+import com.angryguyy.metadatastripper.listeners.ProximityRevealer;
 import com.angryguyy.metadatastripper.network.BlockEntityFilter;
 import com.angryguyy.metadatastripper.util.LicenseManager;
-import com.angryguyy.metadatastripper.listeners.BlockUpdateListener;
-import com.angryguyy.metadatastripper.listeners.ProximityRevealer;
+import com.angryguyy.metadatastripper.util.RegionSchedulerAdapter;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -28,40 +27,55 @@ import net.minecraft.world.level.block.state.BlockState;
 /**
  * Core bootstrap and lifecycle management class for the MetadataStripper Engine.
  * <p>
- * Initializes the zero-GC lookup arrays and injects the low-level Netty payload interceptors.
- * Stripped of all asynchronous tracking maps, spatial profiles, and Bukkit listener overhead
- * to ensure an absolute Zero-GC footprint. All visibility spoofing is delegated exclusively
- * to the stateless "Fire & Forget" network pipeline.
+ * Initializes lookup snapshots, regional packet transformations, and Bukkit listeners for chunk,
+ * block entity, and entity visibility protection. Runtime work is split between the global
+ * scheduler, player region schedulers, and Netty packet delivery.
  * <p>
  * <b>Algorithmic Complexity:</b>
  * <ul>
  *   <li><b>Initialization:</b> O(N) where N is the internal Mojang block registry size.</li>
- *   <li><b>Runtime State:</b> O(1) constant-time memory profile with zero dynamic allocations.</li>
+ *   <li><b>Runtime State:</b> bounded per-player snapshots and packet-local transformation buffers.</li>
  * </ul>
  */
 public final class MetadataStripper extends JavaPlugin {
 
     /**
-     * A highly optimized, primitive O(1) registry mapping NMS Block IDs to their sensitivity flags.
-     * Evaluated instantaneously during asynchronous Netty chunk packet serialization to bypass heavy map lookups.
+     * Creates the plugin lifecycle component.
      */
-    public static final boolean[] sensitiveGlobal;
+    public MetadataStripper() {
+        super();
+    }
 
+    /**
+    * Volatile snapshot mapping NMS block-state IDs to sensitivity flags. A complete replacement
+    * array is published during startup and reload so packet readers never observe a partially rebuilt configuration.
+     */
+    public static volatile boolean[] sensitiveGlobal;
+    private static Throwable sensitiveArrayInitializationFailure;
+
+    /** Number of block entity payloads discarded by the network filter. */
     public static final AtomicLong interceptedNbtPackets = new AtomicLong(0);
+
+    /** Number of entity metadata or equipment packets discarded by the culling filter. */
     public static final AtomicLong interceptedEntityPackets = new AtomicLong(0);
+
+    /** Number of entity packets discarded because the target was outside the tactical radius. */
     public static final AtomicLong culledEntities = new AtomicLong(0);
 
     static {
         int maxStates = 50000;
         try {
             maxStates = Block.BLOCK_STATE_REGISTRY.size() + 1000;
-        } catch (Exception ignored) {}
+        } catch (Exception exception) {
+            sensitiveArrayInitializationFailure = exception;
+        }
         sensitiveGlobal = new boolean[maxStates];
     }
 
     private NettyInjector nettyInjector;
-    private int baseEngineMode;
-    private int alertThreshold;
+    private volatile int baseEngineMode;
+    private volatile int alertThreshold;
+    private ProximityRevealer proximityRevealer;
 
     /**
      * Executes the primary initialization phase of the engine.
@@ -72,10 +86,19 @@ public final class MetadataStripper extends JavaPlugin {
     public void onEnable() {
         try {
             Class.forName("com.angryguyy.metadatastripper.cache.BlockStateCache");
-        } catch (ClassNotFoundException ignored) {}
+        } catch (ClassNotFoundException exception) {
+            getLogger().log(java.util.logging.Level.WARNING,
+                    "Unable to initialize the block state sanitization cache", exception);
+        }
 
         saveDefaultConfig();
         loadConfiguration();
+
+        if (sensitiveArrayInitializationFailure != null) {
+            getLogger().log(java.util.logging.Level.WARNING,
+                "Unable to size the sensitive block state table from the native registry",
+                sensitiveArrayInitializationFailure);
+        }
 
         if (!LicenseManager.validateLicense(this)) {
             getLogger().severe("================================================================");
@@ -96,7 +119,8 @@ public final class MetadataStripper extends JavaPlugin {
         pluginManager.registerEvents(nettyInjector, this);
         pluginManager.registerEvents(new PlayerQuitListener(), this);
         pluginManager.registerEvents(new BlockUpdateListener(), this);
-        pluginManager.registerEvents(new ProximityRevealer(getConfig().getStringList("sensitive-blocks")), this);
+        proximityRevealer = new ProximityRevealer(getConfig().getStringList("sensitive-blocks"));
+        pluginManager.registerEvents(proximityRevealer, this);
 
         PluginCommand msCommand = getCommand("ms");
         if (msCommand != null) {
@@ -107,7 +131,7 @@ public final class MetadataStripper extends JavaPlugin {
 
         EntityCullingEngine.initializeCullingTask(this);
 
-        Bukkit.getAsyncScheduler().runAtFixedRate(this, task -> {
+        RegionSchedulerAdapter.scheduleGlobalRepeating(this, () -> {
             for (org.bukkit.entity.Player player : Bukkit.getOnlinePlayers()) {
                 int violations = BlockEntityFilter.getAndResetViolations(player.getUniqueId());
                 if (violations >= alertThreshold) {
@@ -126,7 +150,7 @@ public final class MetadataStripper extends JavaPlugin {
                     }
                 }
             }
-        }, 60L, 60L, TimeUnit.SECONDS);
+        }, 1200L, 1200L);
 
         getLogger().info("Lightweight Anti-Xray Engine enabled! Background tasks: 1, Dynamic Maps: 0");
     }
@@ -145,17 +169,25 @@ public final class MetadataStripper extends JavaPlugin {
      */
     private void setupSensitiveBlocks() {
         Set<String> configuredMaterials = new HashSet<>(getConfig().getStringList("sensitive-blocks"));
+        boolean[] sensitiveStates = new boolean[Block.BLOCK_STATE_REGISTRY.size() + 1000];
+        int failedStates = 0;
 
-        for (int i = 0; i < Block.BLOCK_STATE_REGISTRY.size(); i++) {
+        for (int i = 0; i < sensitiveStates.length && i < Block.BLOCK_STATE_REGISTRY.size(); i++) {
             try {
                 BlockState state = Block.stateById(i);
                 if (state != null) {
                     org.bukkit.Material mat = state.createCraftBlockData().getMaterial();
                     if (configuredMaterials.contains(mat.name())) {
-                        sensitiveGlobal[i] = true;
+                        sensitiveStates[i] = true;
                     }
                 }
-            } catch (Exception ignored) {}
+            } catch (Exception exception) {
+                failedStates++;
+            }
+        }
+        sensitiveGlobal = sensitiveStates;
+        if (failedStates > 0) {
+            getLogger().warning("Unable to inspect " + failedStates + " native block states while building the sensitive table");
         }
     }
 
@@ -166,8 +198,10 @@ public final class MetadataStripper extends JavaPlugin {
     public void reloadEngine() {
         reloadConfig();
         loadConfiguration();
-        Arrays.fill(sensitiveGlobal, false);
         setupSensitiveBlocks();
+        if (proximityRevealer != null) {
+            proximityRevealer.updateConfiguredBlocks(getConfig().getStringList("sensitive-blocks"));
+        }
     }
 
     /**

@@ -64,7 +64,7 @@ public final class AdminCommand implements CommandExecutor {
                 .append(Component.text(" Entities Culled: ", NamedTextColor.GRAY))
                 .append(Component.text(String.format("%,d", culled) + "\n\n", NamedTextColor.GREEN))
                 .append(Component.text(" Engine Status: ", NamedTextColor.DARK_GRAY))
-                .append(Component.text("ZERO-GC OPTIMIZED\n", NamedTextColor.GREEN))
+                .append(Component.text("REGIONAL PACKET PIPELINE\n", NamedTextColor.GREEN))
                 .append(Component.text("-----------------------------------", NamedTextColor.DARK_GRAY));
 
         sender.sendMessage(telemetry);
