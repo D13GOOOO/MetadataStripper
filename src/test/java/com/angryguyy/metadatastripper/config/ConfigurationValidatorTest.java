@@ -17,9 +17,16 @@ class ConfigurationValidatorTest {
         configuration.set("license-key", "MS-valid");
         configuration.set("sensitive-blocks", java.util.List.of("DIAMOND_ORE", "CHEST"));
 
+        // Aggiungiamo i valori avanzati richiesti dal nuovo validatore
+        configuration.set("advanced.degradation-tps-threshold", 18.5);
+        configuration.set("advanced.tactical-culling-radius", 32.0);
+        configuration.set("advanced.max-pending-region-writes", 32);
+        configuration.set("advanced.proximity-radius", 5);
+        configuration.set("advanced.raytrace-max-distance", 45);
+
         ConfigurationValidator.ValidationResult result = ConfigurationValidator.validate(configuration);
 
-        assertTrue(result.isValid());
+        assertTrue(result.isValid(), "Configuration should be valid but had errors: " + result.errors());
         assertTrue(result.errors().isEmpty());
     }
 
@@ -31,6 +38,13 @@ class ConfigurationValidatorTest {
         configuration.set("client-name", "customer");
         configuration.set("license-key", "MS-invalid");
         configuration.set("sensitive-blocks", java.util.List.of("NOT_A_MATERIAL"));
+
+        // Impostiamo deliberatamente valori errati anche qui
+        configuration.set("advanced.degradation-tps-threshold", 25.0); // Troppo alto (>20)
+        configuration.set("advanced.tactical-culling-radius", -5.0); // Negativo
+        configuration.set("advanced.max-pending-region-writes", 0); // Troppo basso (<1)
+        configuration.set("advanced.proximity-radius", -1); // Negativo
+        configuration.set("advanced.raytrace-max-distance", 0); // Troppo basso (<1)
 
         ConfigurationValidator.ValidationResult result = ConfigurationValidator.validate(configuration);
 
