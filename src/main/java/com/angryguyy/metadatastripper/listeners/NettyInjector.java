@@ -4,6 +4,7 @@ import com.angryguyy.metadatastripper.MetadataStripper;
 import com.angryguyy.metadatastripper.cache.BlockStateCache;
 import com.angryguyy.metadatastripper.network.BlockEntityFilter;
 import com.angryguyy.metadatastripper.util.ObfuscationPalette;
+import com.angryguyy.metadatastripper.util.ReflectionAccess;
 import com.angryguyy.metadatastripper.util.RegionSchedulerAdapter;
 
 import io.netty.channel.Channel;
@@ -37,28 +38,50 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Core network interceptor for applying packet-level obfuscation.
  * <p>
  * This class injects a custom duplex handler into the Netty pipeline of each connected player.
- * It strictly intercepts and mutates chunk data and block updates before serialization, effectively
- * nullifying X-Ray mods, Cave ESPs, and Sus Chunk Finders while delegating NMS chunk access to
- * the recipient player's Paper or Folia scheduler.
+ * It intercepts and mutates outbound chunk data and block updates before serialization, effectively
+ * nullifying X-Ray mods, Cave ESPs, and Sus Chunk Finders.
+ * <p>
+ * <b>Architectural Notes:</b>
+ * <ul>
+ *   <li><b>Dual-Path Execution:</b>
+ *       <ul>
+ *           <li><i>Fast Path:</i> Simple entity filtering happens synchronously on the Netty I/O thread.</li>
+ *           <li><i>Slow Path (Regional):</i> Complex chunk cloning is deferred to the recipient player's Folia Region
+ *               Scheduler via a chained {@link CompletableFuture} queue. This ensures strict thread-safety for NMS
+ *               chunk reads without blocking the network thread.</li>
+ *       </ul>
+ *   </li>
+ *   <li><b>Backpressure Management:</b> The pipeline enforces a strict limit ({@code MAX_PENDING_REGION_WRITES}).
+ *       If a chunk transformation exceeds 2 seconds or the queue overflows, packets are safely dropped or passed
+ *       unmodified to prevent server OOM (Out-Of-Memory) crashes and client disconnections.</li>
+ * </ul>
  * <p>
  * <b>Algorithmic Optimizations:</b>
  * <ul>
- *   <li><b>Memory Allocation:</b> Utilizes {@code sun.misc.Unsafe} to bypass constructor allocations and GC overhead when cloning chunk sections.</li>
- *   <li><b>Loop Unrolling:</b> Hoists static Y-axis calculations out of the inner spatial loops, reducing per-section operations from O(N^3) complex evaluations to primitive assignments.</li>
+ *   <li><b>Zero-GC Cloning:</b> Utilizes {@code sun.misc.Unsafe} to bypass constructor allocations and garbage
+ *       collection overhead when cloning massive {@link LevelChunkSection} objects.</li>
+ *   <li><b>Loop Unrolling:</b> Hoists static Y-axis calculations out of the inner spatial loops, reducing
+ *       per-section operations from O(N^3) complex evaluations to ultra-fast primitive assignments.</li>
  * </ul>
  */
 public final class NettyInjector implements Listener {
 
     private static final String HANDLER_NAME = "MetadataStripper";
+
+    /** The Y-level threshold below which the aggressive Engine Mode 2 obliterates all non-bedrock blocks. */
     private static final int AGGRESSIVE_Y_MAX = 5;
+
+    /** The maximum number of chunk packets allowed to queue for regional transformation before triggering backpressure drops. */
+    private static final int MAX_PENDING_REGION_WRITES = 32;
 
     private static Unsafe unsafe;
     private static Field chunkDataField;
@@ -77,13 +100,8 @@ public final class NettyInjector implements Listener {
             unsafeField.setAccessible(true);
             unsafe = (Unsafe) unsafeField.get(null);
 
-            for (Field field : ClientboundLevelChunkWithLightPacket.class.getDeclaredFields()) {
-                if (field.getType() == ClientboundLevelChunkPacketData.class) {
-                    field.setAccessible(true);
-                    chunkDataField = field;
-                    break;
-                }
-            }
+            chunkDataField = resolveField(ClientboundLevelChunkWithLightPacket.class, "chunkData",
+                    ClientboundLevelChunkPacketData.class);
 
             levelChunkSectionFields = LevelChunkSection.class.getDeclaredFields();
             for (Field f : levelChunkSectionFields) {
@@ -93,21 +111,9 @@ public final class NettyInjector implements Listener {
             palettedContainerCopy = net.minecraft.world.level.chunk.PalettedContainer.class.getMethod("copy");
             palettedContainerCopy.setAccessible(true);
 
-            for (Field f : net.minecraft.world.level.chunk.ChunkAccess.class.getDeclaredFields()) {
-                if (f.getType() == LevelChunkSection[].class) {
-                    f.setAccessible(true);
-                    chunkAccessSectionsField = f;
-                    break;
-                }
-            }
-
-            for (Field f : ClientboundLevelChunkPacketData.class.getDeclaredFields()) {
-                if (List.class.isAssignableFrom(f.getType())) {
-                    f.setAccessible(true);
-                    blockEntitiesDataField = f;
-                    break;
-                }
-            }
+            chunkAccessSectionsField = resolveField(net.minecraft.world.level.chunk.ChunkAccess.class, "sections",
+                    LevelChunkSection[].class);
+            blockEntitiesDataField = resolveField(ClientboundLevelChunkPacketData.class, "blockEntitiesData", List.class);
 
             Class<?> blockEntityInfoClass = Class.forName(
                     "net.minecraft.network.protocol.game.ClientboundLevelChunkPacketData$BlockEntityInfo");
@@ -122,14 +128,32 @@ public final class NettyInjector implements Listener {
         }
     }
 
+    private static Field resolveField(Class<?> owner, String name, Class<?> type) throws NoSuchFieldException {
+        try {
+            return ReflectionAccess.findField(owner, name, type);
+        } catch (NoSuchFieldException exception) {
+            return ReflectionAccess.findUniqueField(owner, type);
+        }
+    }
+
     private final MetadataStripper plugin;
+
+    /** Lock-free cache of players holding the bypass permission, avoiding slow LuckPerms lookups on the Netty thread. */
     private final Map<UUID, Boolean> bypassPlayers = new ConcurrentHashMap<>();
+
+    /** Lock-free cache mapping player UUIDs to their NMS Entity ID to rapidly filter self-metadata packets. */
     private final Map<UUID, Integer> playerEntityIds = new ConcurrentHashMap<>();
 
+    private final AtomicLong lastFailureLogNanos = new AtomicLong();
+    private volatile boolean shuttingDown;
+
     /**
-     * Creates an injector bound to the plugin lifecycle and logger.
+     * Creates a network injector bound to the plugin lifecycle and logger.
+     * <p>
+     * If the static reflection resolution failed, this will log the exception immediately,
+     * and {@link #isReady()} will return {@code false}, pushing the engine into a {@code DEGRADED} state.
      *
-     * @param plugin owning plugin instance
+     * @param plugin the owning plugin instance
      */
     public NettyInjector(MetadataStripper plugin) {
         this.plugin = plugin;
@@ -140,9 +164,21 @@ public final class NettyInjector implements Listener {
     }
 
     /**
-     * Injects the outbound handler when a player joins.
+     * Reports whether all native memory and reflection handles required for chunk transformation are available.
      *
-     * @param event player join event
+     * @return {@code true} when the chunk transformation path is fully initialized; {@code false} otherwise
+     */
+    public boolean isReady() {
+        return chunkDataField != null && chunkAccessSectionsField != null && unsafe != null
+                && levelChunkSectionFields != null && palettedContainerCopy != null
+                && blockEntitiesDataField != null && blockEntityPackedXZField != null
+                && blockEntityYField != null && blockEntityTypeField != null;
+    }
+
+    /**
+     * Triggers the Netty channel injection immediately when a player joins the server.
+     *
+     * @param event the native {@link PlayerJoinEvent}
      */
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
@@ -150,9 +186,9 @@ public final class NettyInjector implements Listener {
     }
 
     /**
-     * Removes the outbound handler when a player quits.
+     * Detaches the outbound handler and clears memory profiles when a player quits.
      *
-     * @param event player quit event
+     * @param event the native {@link PlayerQuitEvent}
      */
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
@@ -160,55 +196,103 @@ public final class NettyInjector implements Listener {
     }
 
     /**
-     * Injects the custom packet interceptor into the player's network channel.
+     * Injects the custom packet interceptor directly into the player's network channel pipeline.
+     * <p>
+     * <b>Thread Mechanics:</b> The injected {@link ChannelDuplexHandler} acts as a gatekeeper.
+     * It parses all outbound traffic and dynamically routes complex chunk operations to a serialized
+     * asynchronous queue (via {@link CompletableFuture}), ensuring chunk packets are delivered in strict order
+     * despite being processed asynchronously on Folia Region Schedulers.
      *
-     * @param player the target player
+     * @param player the target player to inject. Marked {@code final} to ensure safe capture by the anonymous inner class.
      */
-    public void injectPlayer(Player player) {
+    public void injectPlayer(final Player player) {
+        if (shuttingDown) {
+            return;
+        }
         try {
             UUID playerUuid = player.getUniqueId();
+
             bypassPlayers.put(playerUuid, player.hasPermission("metadatastripper.bypass"));
             playerEntityIds.put(playerUuid, player.getEntityId());
+
             Channel channel = ((CraftPlayer) player).getHandle().connection.connection.channel;
             if (channel.pipeline().get(HANDLER_NAME) != null) {
                 channel.pipeline().remove(HANDLER_NAME);
             }
 
             channel.pipeline().addBefore("packet_handler", HANDLER_NAME, new ChannelDuplexHandler() {
+
+                private CompletableFuture<Void> pendingRegionWrites = CompletableFuture.completedFuture(null);
+                private int pendingRegionWriteCount;
+
                 @Override
                 public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+                    if (shuttingDown) {
+                        promise.setSuccess();
+                        return;
+                    }
+
+                    if (isRegionPacket(msg) && !Boolean.TRUE.equals(bypassPlayers.get(playerUuid))) {
+                        if (pendingRegionWriteCount >= MAX_PENDING_REGION_WRITES) {
+                            MetadataStripper.recordBackpressureDrop();
+                            promise.setSuccess();
+                            return;
+                        }
+
+                        CompletableFuture<Void> previous = pendingRegionWrites;
+                        CompletableFuture<Void> current = new CompletableFuture<>();
+                        pendingRegionWriteCount++;
+                        pendingRegionWrites = current;
+
+                        previous.whenComplete((ignored, failure) -> ctx.executor().execute(() ->
+                                writeRegionPacketAsync(ctx, player, msg, promise, current,
+                                        () -> pendingRegionWriteCount--)));
+                        return;
+                    }
+
+                    if (!pendingRegionWrites.isDone()) {
+                        pendingRegionWrites.whenComplete((ignored, failure) -> ctx.executor().execute(() ->
+                                writeNonRegionPacket(ctx, playerUuid, msg, promise)));
+                        return;
+                    }
+
+                    writeNonRegionPacket(ctx, playerUuid, msg, promise);
+                }
+
+                private void writeNonRegionPacket(ChannelHandlerContext ctx, UUID playerUuid,
+                                                  Object msg, ChannelPromise promise) {
                     try {
-                        msg = handlePacket(player, playerUuid, msg);
+                        msg = handlePacket(playerUuid, msg);
                         if (msg == null) {
+                            promise.setSuccess();
                             return;
                         }
                     } catch (Exception e) {
                         plugin.getLogger().log(java.util.logging.Level.WARNING, "Error on outbound packet", e);
                     }
-                    super.write(ctx, msg, promise);
+                    ctx.write(msg, promise);
                 }
             });
         } catch (Exception exception) {
             plugin.getLogger().log(java.util.logging.Level.WARNING,
-                "Unable to inject MetadataStripper into player channel", exception);
+                    "Unable to inject MetadataStripper into player channel", exception);
         }
     }
 
     /**
-     * Core packet evaluator and mutator. Evaluates outbound payloads synchronously.
+     * Evaluates outbound packets that do not require complex regional NMS access.
+     * <p>
+     * <b>Performance:</b> Operates directly on the Netty thread. All evaluations here must be O(1)
+     * and strictly lock-free. Defers to {@link BlockEntityFilter} and {@link com.angryguyy.metadatastripper.network.EntityDataFilter}.
      *
-     * @param player the packet recipient
-     * @param msg the native packet instance
-     * @return the mutated packet, or null if the packet should be dropped
+     * @param playerUuid the UUID of the recipient player
+     * @param msg        the native packet instance
+     * @return the original packet, or {@code null} if the packet violates proximity rules and should be destroyed
      */
     @SuppressWarnings({"unused", "deprecation"})
-    private Object handlePacket(Player player, UUID playerUuid, Object msg) throws InterruptedException, ExecutionException, TimeoutException {
+    private Object handlePacket(UUID playerUuid, Object msg) {
         if (Boolean.TRUE.equals(bypassPlayers.get(playerUuid))) {
             return msg;
-        }
-
-        if (msg instanceof ClientboundBlockUpdatePacket || msg instanceof ClientboundLevelChunkWithLightPacket) {
-            return RegionSchedulerAdapter.callForEntity(plugin, player, () -> handleRegionPacket(player, msg), 2L, TimeUnit.SECONDS);
         }
 
         if (msg instanceof ClientboundBlockEntityDataPacket packet && BlockEntityFilter.shouldBlock(playerUuid, packet.getType(), packet.getPos())) {
@@ -223,6 +307,95 @@ public final class NettyInjector implements Listener {
         return msg;
     }
 
+    /**
+     * Identifies packets that must interact with the world geometry.
+     *
+     * @param msg the generic packet object
+     * @return {@code true} if the packet contains chunk or block state data
+     */
+    private boolean isRegionPacket(Object msg) {
+        return msg instanceof ClientboundBlockUpdatePacket || msg instanceof ClientboundLevelChunkWithLightPacket;
+    }
+
+    /**
+     * Dispatches a heavy packet to the Folia Region Scheduler for asynchronous processing.
+     * <p>
+     * Enforces a strict 2-second bounding timeout to prevent deadlocks. If the region thread is overloaded,
+     * the packet is safely dropped or passed untouched, triggering a {@code DEGRADED} diagnostic state.
+     *
+     * @param ctx            the Netty channel context
+     * @param player         the target player
+     * @param originalPacket the raw outbound packet
+     * @param promise        the Netty promise to fulfill
+     * @param completion     the completable future controlling the ordered queue
+     * @param releaseSlot    the callback to decrement the backpressure queue count
+     */
+    private void writeRegionPacketAsync(ChannelHandlerContext ctx, Player player,
+                                        Object originalPacket, ChannelPromise promise,
+                                        CompletableFuture<Void> completion, Runnable releaseSlot) {
+        AtomicBoolean completed = new AtomicBoolean();
+
+        CompletableFuture<Object> transformed = RegionSchedulerAdapter.callForEntityAsync(
+                plugin, player, () -> handleRegionPacket(player, originalPacket), 2L, TimeUnit.SECONDS);
+
+        transformed.whenComplete((packet, throwable) -> ctx.executor().execute(() -> {
+            if (!completed.compareAndSet(false, true)) {
+                return;
+            }
+            releaseSlot.run();
+
+            if (shuttingDown) {
+                promise.setSuccess();
+                completion.complete(null);
+                return;
+            }
+
+            if (throwable != null) {
+                boolean timeout = throwable instanceof java.util.concurrent.TimeoutException
+                        || throwable.getCause() instanceof java.util.concurrent.TimeoutException;
+                MetadataStripper.recordFallback(timeout);
+
+                long now = System.nanoTime();
+                long previous = lastFailureLogNanos.get();
+                if (now - previous >= TimeUnit.SECONDS.toNanos(10)
+                        && lastFailureLogNanos.compareAndSet(previous, now)) {
+                    plugin.getLogger().log(java.util.logging.Level.WARNING,
+                            timeout ? "Timed out transforming outbound packet; dropping it safely"
+                                    : "Failed transforming outbound packet; dropping it safely", throwable);
+                }
+
+                promise.setSuccess();
+                completion.complete(null);
+                return;
+            }
+
+            if (packet == null) {
+                promise.setSuccess();
+                completion.complete(null);
+                return;
+            }
+
+            if (originalPacket instanceof ClientboundLevelChunkWithLightPacket) {
+                MetadataStripper.recordTransformedChunk();
+            }
+
+            ctx.write(packet, promise);
+            completion.complete(null);
+        }));
+    }
+
+    /**
+     * Core region-thread mutation engine for Chunk and Block Update packets.
+     * <p>
+     * <b>Chunk Cloning Mechanics:</b> Because NMS Chunks are cached and shared across multiple players,
+     * mutating them directly causes server-wide corruption. This method uses {@code sun.misc.Unsafe} to
+     * shallow-copy the chunk section structure (Zero-GC instantiation), deep-copies the {@code PalettedContainer}
+     * to safely modify blocks, and reconstructs an ephemeral packet solely for this client.
+     *
+     * @param player the recipient player
+     * @param msg    the un-obfuscated region packet
+     * @return the deeply obfuscated packet ready for client consumption, or {@code null} if it should be skipped
+     */
     private Object handleRegionPacket(Player player, Object msg) {
         BlockEntityFilter.updatePosition(player);
 
@@ -238,9 +411,11 @@ public final class NettyInjector implements Listener {
                 return new ClientboundBlockUpdatePacket(packet.getPos(), sanitized);
             }
         }
+
         if (msg instanceof ClientboundLevelChunkWithLightPacket chunkPacket) {
             if (chunkDataField == null || chunkAccessSectionsField == null || unsafe == null) {
-                return msg;
+                MetadataStripper.recordFallback(false);
+                return null;
             }
 
             net.minecraft.world.entity.player.Player nmsPlayer = ((CraftPlayer) player).getHandle();
@@ -248,7 +423,8 @@ public final class NettyInjector implements Listener {
             LevelChunk chunk = serverLevel.getChunkSource().getChunkNow(chunkPacket.getX(), chunkPacket.getZ());
 
             if (chunk == null) {
-                return msg;
+                MetadataStripper.recordFallback(false);
+                return null;
             }
 
             Environment env = getEnvironmentFast(serverLevel);
@@ -258,6 +434,7 @@ public final class NettyInjector implements Listener {
             BlockState stone = ObfuscationPalette.getObfuscatedBlock(engineMode, new BlockPos(0, 1, 0), env);
             BlockState deepslate = ObfuscationPalette.getObfuscatedBlock(engineMode, new BlockPos(0, -1, 0), env);
             int minBuildHeight = player.getWorld().getMinHeight();
+
             boolean[] sensitiveStates = MetadataStripper.sensitiveGlobal;
 
             try {
@@ -283,7 +460,6 @@ public final class NettyInjector implements Listener {
                     } else {
                         for (int y = 0; y < 16; y++) {
                             int actualY = globalSectionY + y;
-                            BlockState replacement = actualY < 0 ? deepslate : stone;
                             boolean checkLiquid = actualY < 55;
 
                             for (int x = 0; x < 16; x++) {
@@ -379,8 +555,10 @@ public final class NettyInjector implements Listener {
                 }
 
             } catch (Exception exception) {
+                MetadataStripper.recordFallback(false);
                 plugin.getLogger().log(java.util.logging.Level.WARNING,
                         "Unable to sanitize chunk packet for " + player.getName(), exception);
+                return null;
             }
 
             return chunkPacket;
@@ -389,6 +567,18 @@ public final class NettyInjector implements Listener {
         return msg;
     }
 
+    /**
+     * Scrubs sensitive Block Entities (like hidden chests or spawners) that are embedded directly inside the chunk payload.
+     * <p>
+     * Uses reflection to strip out the underlying NBT data, preventing Stash Finders from detecting
+     * containers when a chunk is initially loaded.
+     *
+     * @param chunkData  the NMS chunk serialization payload
+     * @param chunkX     the grid X coordinate of the chunk
+     * @param chunkZ     the grid Z coordinate of the chunk
+     * @param playerUuid the receiving player's UUID
+     * @throws IllegalAccessException if reflection access is restricted
+     */
     private void filterChunkBlockEntities(ClientboundLevelChunkPacketData chunkData, int chunkX, int chunkZ, UUID playerUuid)
             throws IllegalAccessException {
         if (blockEntitiesDataField == null || blockEntityPackedXZField == null || blockEntityYField == null || blockEntityTypeField == null) {
@@ -402,7 +592,9 @@ public final class NettyInjector implements Listener {
                 Object blockEntity = iterator.next();
                 int packedXZ = blockEntityPackedXZField.getInt(blockEntity);
                 int y = blockEntityYField.getInt(blockEntity);
+
                 BlockPos position = new BlockPos((chunkX << 4) + (packedXZ & 15), y, (chunkZ << 4) + ((packedXZ >> 4) & 15));
+
                 if (BlockEntityFilter.shouldBlock(playerUuid, (net.minecraft.world.level.block.entity.BlockEntityType<?>) blockEntityTypeField.get(blockEntity), position)) {
                     iterator.remove();
                 }
@@ -419,6 +611,12 @@ public final class NettyInjector implements Listener {
         }
     }
 
+    /**
+     * Determines the environment dimension rapidly without expensive Bukkit API calls.
+     *
+     * @param level the native NMS Level instance
+     * @return the corresponding Bukkit Environment
+     */
     private Environment getEnvironmentFast(Level level) {
         if (level.dimension() == Level.NETHER) {
             return Environment.NETHER;
@@ -431,6 +629,9 @@ public final class NettyInjector implements Listener {
 
     /**
      * Safely detaches the custom packet interceptor upon player disconnection.
+     * <p>
+     * Cleans up lock-free profiles to prevent memory leaks, and executes the pipeline removal
+     * directly on the Netty Event Loop to ensure thread safety.
      *
      * @param player the disconnecting player
      */
@@ -454,5 +655,15 @@ public final class NettyInjector implements Listener {
             plugin.getLogger().log(java.util.logging.Level.WARNING,
                     "Unable to schedule MetadataStripper channel removal", exception);
         }
+    }
+
+    /**
+     * Stops accepting new packet work and clears all injector-owned memory caches.
+     * Invoked during plugin shutdown or reload.
+     */
+    public void shutdown() {
+        shuttingDown = true;
+        bypassPlayers.clear();
+        playerEntityIds.clear();
     }
 }

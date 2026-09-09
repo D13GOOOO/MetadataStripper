@@ -12,19 +12,32 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
  * This cache intercepts and cleanses sensitive block metadata that could be exploited by unauthorized
  * client-side modifications, such as chunk finders, growth-tracking ESPs, and world seed crackers.
  * It systematically strips deterministic variables including crop maturation stages, waterlogged statuses,
- * leaf distances, and snow layer thicknesses.
+ * leaf distances, snow layer thicknesses, and generation-specific orientations.
+ * <p>
+ * <b>Architectural Notes:</b>
+ * <ul>
+ *   <li><b>Thread Safety:</b> Completely thread-safe. The internal state is deeply immutable post-initialization.
+ *       It is entirely safe to invoke from asynchronous Netty I/O threads, Paper/Folia region schedulers, or the global region.</li>
+ *   <li><b>Execution Context:</b> Lookups are explicitly designed for the outbound packet path and regional chunk transformations,
+ *       ensuring no blocking operations disrupt the server's tick loop or network event loops.</li>
+ *   <li><b>Version Dependency:</b> This component directly interfaces with internal Minecraft code (NMS 1.21.x).
+ *       It relies on the runtime stability of the {@link Block#BLOCK_STATE_REGISTRY}.</li>
+ * </ul>
  * <p>
  * <b>Algorithmic Complexity:</b>
  * <ul>
- *   <li><b>Initialization:</b> O(N) where N is the total block state registry size. Executed synchronously during plugin startup.</li>
- *   <li><b>Lookup:</b> O(1) direct array indexing with no intentional per-lookup allocation.</li>
+ *   <li><b>Initialization:</b> O(N) where N is the total block state registry size. Executed synchronously only once during plugin startup.</li>
+ *   <li><b>Lookup:</b> O(1) direct array indexing. Operates with no intentional per-lookup allocation, maintaining strict zero-GC pressure during packet serialization.</li>
  * </ul>
  */
 public final class BlockStateCache {
 
     /**
      * Pre-computed array mapping native NMS Block IDs to their sanitized equivalents.
-     * Null values within the array indicate that the original block state requires no sanitization.
+     * <p>
+     * <b>Memory Optimization:</b> Null values within the array act as markers indicating that the original
+     * block state requires no sanitization. This avoids storing redundant references and allows for a rapid
+     * identity fallback during the O(1) lookup process.
      */
     private static final BlockState[] SANITIZED_STATES;
 
@@ -49,6 +62,11 @@ public final class BlockStateCache {
         }
     }
 
+    /**
+     * Private constructor to prevent instantiation of this utility class.
+     *
+     * @throws UnsupportedOperationException if called via reflection.
+     */
     private BlockStateCache() {
         throw new UnsupportedOperationException("Utility class cannot be instantiated.");
     }
@@ -56,10 +74,12 @@ public final class BlockStateCache {
     /**
      * Retrieves the sanitized, mathematically flattened equivalent of a given block state.
      * <p>
-    * Evaluates using a pre-computed array indexed by the native NMS Block ID.
+     * Evaluates the state using a pre-computed array indexed by the native NMS Block ID.
+     * Because it relies entirely on a lock-free array read, it handles high-throughput
+     * backpressure scenarios gracefully within the bounded regional queues.
      *
-     * @param state the original, potentially sensitive native block state
-     * @return the normalized block state, or the original state if no sanitization is required
+     * @param state the original, potentially sensitive native {@link BlockState}. Can be {@code null}.
+     * @return the normalized {@link BlockState}, or the original state if no sanitization is required or if the ID is unrecognized.
      */
     public static BlockState sanitize(BlockState state) {
         if (state == null) {
@@ -79,10 +99,19 @@ public final class BlockStateCache {
 
     /**
      * Internal mutation engine that systematically strips deterministic metadata properties
-     * from a given block state. This normalizes patterns to neutralize reverse-engineering algorithms.
+     * from a given block state.
+     * <p>
+     * This normalization process neutralizes reverse-engineering algorithms by flattening
+     * block patterns. Specifically, it targets:
+     * <ul>
+     *   <li><b>Growth/Age:</b> Resets crop ages (AGE_1 to AGE_25) and sapling stages to zero.</li>
+     *   <li><b>Environment:</b> Removes waterlogged flags, resets snow layers to 1, and clears farmland moisture.</li>
+     *   <li><b>Foliage/Flora:</b> Resets leaf distance tracking and removes berry bush fruiting states.</li>
+     *   <li><b>Orientation:</b> Forces {@link Blocks#DEEPSLATE} to a consistent Y-axis alignment to obscure natural seed generation patterns.</li>
+     * </ul>
      *
-     * @param state the native block state evaluated during initialization
-     * @return a normalized, baseline representation of the block state
+     * @param state the native block state evaluated during the O(N) initialization phase.
+     * @return a normalized, baseline representation of the block state, or the original state if no targeted properties exist.
      */
     private static BlockState applySanitization(BlockState state) {
         BlockState spoofed = state;

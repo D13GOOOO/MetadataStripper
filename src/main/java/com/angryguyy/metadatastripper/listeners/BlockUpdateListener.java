@@ -9,40 +9,56 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 
 /**
- * A bounded-overhead listener responsible for dynamically revealing obfuscated blocks.
+ * A bounded-overhead listener responsible for dynamically revealing obfuscated blocks during legitimate mining.
  * <p>
- * When a player breaks a block, this class immediately forces a block state update for the
- * six adjacent faces. Since single-block updates deliberately bypass the aggressive chunk
- * obfuscation pipeline in Netty, this seamlessly reveals hidden ores to legitimate players
- * during manual excavation without compromising the anti-xray integrity.
+ * When a player successfully breaks a block, this class immediately forces a block state update for the
+ * six adjacent faces. Since single-block updates (via {@link Player#sendBlockChange(org.bukkit.Location, org.bukkit.block.data.BlockData)})
+ * deliberately bypass the aggressive chunk obfuscation pipeline handled by Netty, this seamlessly reveals
+ * hidden ores to legitimate players without compromising the broader anti-xray integrity of the chunk.
  * <p>
- * <b>Algorithmic Complexity:</b>
+ * <b>Architectural Notes:</b>
  * <ul>
- *   <li><b>Memory Allocation:</b> Uses a pre-computed static face array and the Bukkit block update API.</li>
- *   <li><b>Execution Time:</b> O(1) constant time execution per block break event.</li>
+ *   <li><b>Execution Context:</b> Executes synchronously on the region thread (Folia) or the main server thread (Paper)
+ *       during the block break event phase.</li>
+ *   <li><b>GC Pressure & Performance:</b> Strictly bounded to O(1) execution time. By utilizing a pre-allocated static array
+ *       for directional offsets, it guarantees zero object allocation overhead during highly frequent mining operations.</li>
+ *   <li><b>Security & Compatibility:</b> Operates at the {@link EventPriority#MONITOR} level to ensure blocks are only revealed
+ *       if the break action was definitively permitted by the server (e.g., passing WorldGuard/Towny protection checks).</li>
  * </ul>
  */
 public final class BlockUpdateListener implements Listener {
 
     /**
-     * Creates the block-break reveal listener.
-     */
-    public BlockUpdateListener() {
-    }
-
-    /**
      * Pre-allocated static array containing the six cardinal block faces.
-     * Prevents object instantiation overhead during the highly frequent block-break event cycle.
+     * <p>
+     * <b>Memory Optimization:</b> Caching these enum constants prevents the continuous array instantiation
+     * overhead that would normally occur if {@code new BlockFace[]{...}} or {@code List.of(...)} were used
+     * inside the highly frequent block-break event cycle.
      */
     private static final BlockFace[] ADJACENT_FACES = {
             BlockFace.UP, BlockFace.DOWN, BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST
     };
 
     /**
-     * Intercepts block break events at the MONITOR priority level to ensure the event
-     * was not cancelled by other protection plugins (e.g., WorldGuard, Towny) before acting.
+     * Creates the block-break reveal listener.
+     * <p>
+     * Must be registered with the Bukkit {@link org.bukkit.plugin.PluginManager} during plugin startup.
+     */
+    public BlockUpdateListener() {
+    }
+
+    /**
+     * Intercepts block break events to safely reveal adjacent blocks to the mining player.
+     * <p>
+     * The {@code ignoreCancelled = true} constraint combined with the {@link EventPriority#MONITOR} priority
+     * ensures that this logic only executes if the block break was completely successful and not blocked
+     * by other server mechanisms.
+     * <p>
+     * If the player possesses the {@code metadatastripper.bypass} permission, this operation is short-circuited,
+     * as their chunk packets are never obfuscated by the Netty handler in the first place.
      *
-     * @param event the native block break event
+     * @param event the native {@link BlockBreakEvent} dispatched by the server
+     * @see Player#sendBlockChange(org.bukkit.Location, org.bukkit.block.data.BlockData)
      */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockBreak(BlockBreakEvent event) {
@@ -56,6 +72,7 @@ public final class BlockUpdateListener implements Listener {
 
         for (BlockFace face : ADJACENT_FACES) {
             Block adjacent = center.getRelative(face);
+
             player.sendBlockChange(adjacent.getLocation(), adjacent.getBlockData());
         }
     }

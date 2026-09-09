@@ -5,9 +5,7 @@ import org.bukkit.entity.Entity;
 import org.bukkit.plugin.Plugin;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 /**
@@ -54,30 +52,31 @@ public final class RegionSchedulerAdapter {
     }
 
     /**
-     * Executes a computation on the owning entity scheduler and waits for its result.
+     * Executes a computation on the owning entity scheduler without blocking the caller.
      *
      * @param plugin plugin owning the scheduled task
      * @param entity entity selecting the Paper or Folia execution context
      * @param task computation that must access entity-owned server state
-     * @param timeout maximum wait duration
+     * @param timeout maximum completion duration before the future fails
      * @param unit timeout unit
      * @param <T> computation result type
-     * @return the value produced by the scheduled computation
-     * @throws InterruptedException if the waiting thread is interrupted
-     * @throws ExecutionException if the scheduled computation fails
-     * @throws TimeoutException if the scheduler does not complete in time
+     * @return future completed by the owning scheduler
      */
-    public static <T> T callForEntity(Plugin plugin, Entity entity, Supplier<T> task, long timeout, TimeUnit unit)
-            throws InterruptedException, ExecutionException, TimeoutException {
+    public static <T> CompletableFuture<T> callForEntityAsync(Plugin plugin, Entity entity, Supplier<T> task,
+                                                               long timeout, TimeUnit unit) {
         CompletableFuture<T> result = new CompletableFuture<>();
-        executeForEntity(plugin, entity, () -> {
-            try {
-                result.complete(task.get());
-            } catch (Throwable throwable) {
-                result.completeExceptionally(throwable);
-            }
-        });
-        return result.get(timeout, unit);
+        try {
+            executeForEntity(plugin, entity, () -> {
+                try {
+                    result.complete(task.get());
+                } catch (Throwable throwable) {
+                    result.completeExceptionally(throwable);
+                }
+            });
+        } catch (Throwable throwable) {
+            result.completeExceptionally(throwable);
+        }
+        return result.orTimeout(timeout, unit);
     }
 
     /**
@@ -87,12 +86,16 @@ public final class RegionSchedulerAdapter {
      * @param task task that may access global Bukkit state
      * @param initialDelayTicks initial delay in server ticks
      * @param periodTicks repetition period in server ticks
+    * @return cancellation action for the scheduled task
      */
-    public static void scheduleGlobalRepeating(Plugin plugin, Runnable task, long initialDelayTicks, long periodTicks) {
+    public static Runnable scheduleGlobalRepeating(Plugin plugin, Runnable task, long initialDelayTicks, long periodTicks) {
         if (IS_FOLIA) {
-            Bukkit.getGlobalRegionScheduler().runAtFixedRate(plugin, scheduledTask -> task.run(), initialDelayTicks, periodTicks);
+            final io.papermc.paper.threadedregions.scheduler.ScheduledTask[] handle = new io.papermc.paper.threadedregions.scheduler.ScheduledTask[1];
+            handle[0] = Bukkit.getGlobalRegionScheduler().runAtFixedRate(plugin, scheduledTask -> task.run(), initialDelayTicks, periodTicks);
+            return () -> handle[0].cancel();
         } else {
-            Bukkit.getScheduler().runTaskTimer(plugin, task, initialDelayTicks, periodTicks);
+            org.bukkit.scheduler.BukkitTask handle = Bukkit.getScheduler().runTaskTimer(plugin, task, initialDelayTicks, periodTicks);
+            return handle::cancel;
         }
     }
 }

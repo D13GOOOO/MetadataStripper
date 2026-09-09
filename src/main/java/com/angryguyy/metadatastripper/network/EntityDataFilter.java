@@ -7,37 +7,61 @@ import org.bukkit.entity.Player;
 import java.util.UUID;
 
 /**
- * High-performance evaluator for entity metadata payloads.
+ * High-performance evaluator for entity metadata and equipment network payloads.
  * <p>
- * Defeats Armor Buster, Entity Owner ESP, and Pop Chams by dropping metadata and equipment
- * packets for entities that fall outside the legitimate tactical engagement radius.
+ * This class neutralizes advanced combat-oriented client exploits—such as Armor Buster,
+ * Entity Owner ESP, and Pop Chams—by aggressively intercepting and dropping metadata and
+ * equipment packets for entities that fall outside the legitimate 32-block tactical engagement radius.
+ * <p>
+ * <b>Architectural Notes:</b>
+ * <ul>
+ *   <li><b>Execution Context:</b> Operates entirely on the asynchronous Netty I/O outbound threads.
+ *       It strictly avoids directly querying Bukkit/Folia spatial APIs (which would throw asynchronous
+ *       access exceptions or cause severe desynchronization).</li>
+ *   <li><b>Performance & Memory:</b> Relies on the O(log N) lock-free binary search provided by the
+ *       {@link EntityCullingEngine}. This guarantees microsecond-level packet evaluation with
+ *       zero object allocation (Zero-GC pressure) during the highly frequent entity update cycle.</li>
+ *   <li><b>Telemetry Integration:</b> Automatically increments global atomic counters when packets
+ *       are successfully blocked, feeding the diagnostic dashboard ({@code /ms diagnose}).</li>
+ * </ul>
  */
 public final class EntityDataFilter {
 
+    /**
+     * Private constructor to prevent instantiation of this utility class.
+     *
+     * @throws UnsupportedOperationException if called via reflection.
+     */
     private EntityDataFilter() {
         throw new UnsupportedOperationException("Utility class cannot be instantiated.");
     }
 
     /**
-     * Evaluates whether the entity metadata or equipment packet should be dropped based on spatial proximity.
-     * Engineered to operate safely and concurrently on Netty I/O threads by querying a lock-free,
-     * pre-computed primitive array, entirely avoiding Bukkit/Folia main-thread desynchronization.
+     * Evaluates whether an entity metadata or equipment packet should be dropped based on spatial proximity.
+     * <p>
+     * Engineered to operate safely and concurrently on Netty I/O threads by unwrapping the player's
+     * identifier and routing the query to the pre-computed, lock-free spatial primitive array.
      *
-     * @param player   the recipient player
-     * @param entityId the network ID of the target entity
-     * @return true if the packet should be intercepted and destroyed, false otherwise
+     * @param player   the recipient player bound to the network channel
+     * @param entityId the network ID of the target entity the packet is attempting to update
+     * @return {@code true} if the packet is deemed out-of-bounds and must be destroyed; {@code false} if it should pass
      */
     public static boolean shouldBlock(Player player, int entityId) {
         return shouldBlock(player.getUniqueId(), player.getEntityId(), entityId);
     }
 
     /**
-     * Evaluates entity visibility without querying Bukkit from the network thread.
+     * Core evaluation logic for entity visibility that operates entirely independently of the Bukkit API.
+     * <p>
+     * <b>Self-Data Bypass:</b> This method inherently guarantees that a player will always receive
+     * metadata updates concerning their own entity (e.g., taking damage, status effects, self-equipment changes),
+     * preventing client-side desynchronization and visual bugs.
      *
-     * @param playerUuid recipient player identifier
-     * @param playerEntityId recipient entity identifier
-     * @param entityId target entity identifier
-     * @return true when the entity packet must be discarded
+     * @param playerUuid     the unique identifier of the recipient player
+     * @param playerEntityId the network entity identifier of the recipient player
+     * @param entityId       the network entity identifier of the target entity
+     * @return {@code true} when the entity packet violates the tactical radius and must be discarded; {@code false} otherwise
+     * @see EntityCullingEngine#isEntityVisible(UUID, int)
      */
     public static boolean shouldBlock(UUID playerUuid, int playerEntityId, int entityId) {
         if (playerEntityId == entityId) {

@@ -7,6 +7,8 @@ import net.minecraft.world.level.block.entity.BlockEntityType;
 import org.bukkit.entity.Player;
 
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -14,41 +16,81 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * High-performance evaluator for block entity network payloads.
  * <p>
- * Defeats Stash Finder, City ESP, and Auto Sign modules by dropping NBT data packets
- * for containers and signs that are outside of a legitimate 8-block interaction range.
- * Integrates a thread-safe violation profiler to detect exploit usage patterns asynchronously.
+ * This class neutralizes advanced client-side exploit modules (such as Stash Finder, City ESP, and Auto Sign)
+ * by aggressively intercepting and dropping NBT data packets for sensitive block entities (containers, signs, spawners)
+ * that fall outside of a strict 8-block legitimate interaction range.
+ * <p>
+ * <b>Architectural Notes:</b>
+ * <ul>
+ *   <li><b>Execution Context:</b> Operates concurrently across multiple thread domains. Player position updates
+ *       originate from the Region Schedulers, while packet evaluation ({@link #shouldBlock(UUID, BlockEntityType, BlockPos)})
+ *       executes directly within the highly sensitive Netty I/O outbound event loop.</li>
+ *   <li><b>Thread Safety & Memory Barrier:</b> Employs lock-free {@link ConcurrentHashMap}s and {@code volatile}
+ *       data structures. This ensures that position snapshots and configuration reloads are safely published
+ *       to the network threads without introducing locking contention.</li>
+ *   <li><b>Performance Optimization:</b> Engineered for nanosecond-level packet evaluation. It avoids computationally
+ *       expensive square roots ({@link Math#sqrt(double)}) by using squared distance thresholding, and utilizes
+ *       direct reference equality ({@code ==}) for NMS identity checks.</li>
+ * </ul>
  */
 public final class BlockEntityFilter {
 
+    /**
+     * The squared tactical distance (8 blocks * 8 blocks = 64.0) used for spatial filtering.
+     * Comparing squared distances prevents the CPU overhead of calculating square roots on every packet.
+     */
     private static final double MAX_DISTANCE_SQ = 64.0;
 
+    /**
+     * Lock-free map tracking the number of blocked NBT packets per player.
+     * Used asynchronously by the global violation profiler to alert staff of suspicious activity.
+     */
     private static final Map<UUID, AtomicInteger> PROFILES = new ConcurrentHashMap<>();
+
+    /**
+     * Lock-free map holding the latest spatial coordinate snapshots for online players.
+     */
     private static final Map<UUID, Position> POSITIONS = new ConcurrentHashMap<>();
 
+    /**
+     * Immutable, thread-safe set of dynamically configured sensitive materials.
+     */
+    private static volatile Set<String> configuredSensitiveMaterials = Set.of();
+
+    /**
+     * Private constructor to prevent instantiation of this utility class.
+     *
+     * @throws UnsupportedOperationException if called via reflection.
+     */
     private BlockEntityFilter() {
         throw new UnsupportedOperationException("Utility class cannot be instantiated.");
     }
 
     /**
-     * Evaluates whether the Block Entity data packet should be dropped based on spatial constraints.
+     * Evaluates whether a Block Entity data packet should be dropped based on spatial constraints.
+     * <p>
      * Intercepts NBT payloads directly on the Netty pipeline, shielding the client from receiving
      * sensitive data of out-of-reach block entities.
      *
-     * @param player the recipient player
-     * @param packet the outbound NBT data packet
-     * @return true if the packet should be intercepted and destroyed, false otherwise
+     * @param player the recipient player bound to the network channel
+     * @param packet the outbound NMS NBT data packet
+     * @return {@code true} if the packet is deemed out-of-bounds and must be destroyed; {@code false} if it should pass
      */
     public static boolean shouldBlock(Player player, ClientboundBlockEntityDataPacket packet) {
         return shouldBlock(player.getUniqueId(), packet.getType(), packet.getPos());
     }
 
     /**
-     * Evaluates a block entity packet using the last region-thread position snapshot.
+     * Core evaluation logic for block entity packets using the last known region-thread position snapshot.
+     * <p>
+     * <b>Security Fallback:</b> If a player's position is unknown (e.g., during the exact tick of login before
+     * the region thread publishes the first snapshot), this method defaults to {@code true} (blocking the packet)
+     * to ensure zero-trust compliance.
      *
-     * @param playerUuid recipient player identifier
-     * @param type block entity type carried by the packet
-     * @param pos block entity position
-     * @return true when the packet must be discarded
+     * @param playerUuid the unique identifier of the recipient player
+     * @param type       the native block entity type carried by the packet
+     * @param pos        the absolute 3D spatial coordinates of the block entity
+     * @return {@code true} when the packet violates proximity rules and must be discarded; {@code false} otherwise
      */
     public static boolean shouldBlock(UUID playerUuid, BlockEntityType<?> type, BlockPos pos) {
         if (!isSensitive(type)) {
@@ -57,7 +99,7 @@ public final class BlockEntityFilter {
 
         Position position = POSITIONS.get(playerUuid);
         if (position == null) {
-            return false;
+            return true;
         }
 
         double dx = position.x - pos.getX();
@@ -84,9 +126,13 @@ public final class BlockEntityFilter {
     }
 
     /**
-     * Publishes a player position for lock-free packet filtering.
+     * Publishes a player's exact native coordinates to the lock-free tracking map.
+     * <p>
+     * <b>Execution Requirement:</b> This method must be called by the player's owning Region Thread
+     * (e.g., synchronized with {@link com.angryguyy.metadatastripper.engine.EntityCullingEngine})
+     * to safely read native NMS coordinates without violating Folia's threading model.
      *
-     * @param player player whose position is read on its owning region thread
+     * @param player the player whose position is being snapshotted
      */
     public static void updatePosition(Player player) {
         net.minecraft.server.level.ServerPlayer handle = ((org.bukkit.craftbukkit.entity.CraftPlayer) player).getHandle();
@@ -95,10 +141,12 @@ public final class BlockEntityFilter {
 
     /**
      * Retrieves and atomically resets the violation count for the specified player.
-     * Designed to be polled routinely by a global scheduling task without causing thread blocking.
+     * <p>
+     * Designed to be polled routinely by a global scheduling task (e.g., the staff alert profiler)
+     * without causing thread blocking or impacting Netty pipeline performance.
      *
-     * @param uuid the player's unique identifier
-     * @return the number of blocked NBT packets since the last check
+     * @param uuid the unique identifier of the player being profiled
+     * @return the number of blocked NBT packets since the last check, or 0 if none
      */
     public static int getAndResetViolations(UUID uuid) {
         AtomicInteger profile = PROFILES.get(uuid);
@@ -106,9 +154,10 @@ public final class BlockEntityFilter {
     }
 
     /**
-     * Safely clears the tracking profile from memory when a player disconnects to prevent memory leaks.
+     * Safely clears tracking profiles and position snapshots from memory when a player disconnects.
+     * Prevents memory leaks within the static caches.
      *
-     * @param uuid the player's unique identifier
+     * @param uuid the unique identifier of the disconnected player
      */
     public static void removeProfile(UUID uuid) {
         PROFILES.remove(uuid);
@@ -116,11 +165,35 @@ public final class BlockEntityFilter {
     }
 
     /**
-     * Cross-references the provided block entity type against a predefined list of sensitive containers.
-     * Utilizes direct memory address comparison for nanosecond-level evaluation.
+     * Purges all static player profiles and configuration data.
+     * Primarily used during plugin shutdown to leave a clean memory state.
+     */
+    public static void clearAll() {
+        PROFILES.clear();
+        POSITIONS.clear();
+        configuredSensitiveMaterials = Set.of();
+    }
+
+    /**
+     * Publishes configured block materials used to extend block entity protection dynamically.
+     * <p>
+     * Converts the provided list into an immutable {@link HashSet} and publishes it to the
+     * {@code volatile} field, guaranteeing safe reads across all network threads instantly.
      *
-     * @param type the internal NMS BlockEntityType
-     * @return true if the block entity holds sensitive NBT data
+     * @param materials a set of normalized Bukkit material names loaded from the configuration
+     */
+    public static void updateSensitiveMaterials(Set<String> materials) {
+        configuredSensitiveMaterials = Set.copyOf(new HashSet<>(materials));
+    }
+
+    /**
+     * Cross-references the provided block entity type against a predefined list of sensitive containers.
+     * <p>
+     * <b>Performance:</b> Utilizes direct memory address comparison ({@code ==}) against internal NMS
+     * constants for nanosecond-level evaluation, bypassing standard {@code equals()} overhead.
+     *
+     * @param type the internal NMS {@link BlockEntityType}
+     * @return {@code true} if the block entity holds sensitive NBT data; {@code false} otherwise
      */
     private static boolean isSensitive(BlockEntityType<?> type) {
         return type == BlockEntityType.CHEST ||
@@ -131,9 +204,38 @@ public final class BlockEntityFilter {
                 type == BlockEntityType.HANGING_SIGN ||
                 type == BlockEntityType.MOB_SPAWNER ||
                 type == BlockEntityType.VAULT ||
-                type == BlockEntityType.DECORATED_POT;
+                type == BlockEntityType.DECORATED_POT ||
+                configuredSensitiveMaterials.contains(materialName(type));
     }
 
+    /**
+     * Maps a native NMS BlockEntityType to its equivalent Bukkit material name string.
+     * Allows dynamic configuration rules to intersect seamlessly with native NMS packet filtering.
+     *
+     * @param type the internal NMS {@link BlockEntityType}
+     * @return the normalized string representation of the material, or an empty string if unmapped
+     */
+    private static String materialName(BlockEntityType<?> type) {
+        if (type == BlockEntityType.TRIAL_SPAWNER) return "TRIAL_SPAWNER";
+        if (type == BlockEntityType.CHEST) return "CHEST";
+        if (type == BlockEntityType.TRAPPED_CHEST) return "TRAPPED_CHEST";
+        if (type == BlockEntityType.BARREL) return "BARREL";
+        if (type == BlockEntityType.SHULKER_BOX) return "SHULKER_BOX";
+        if (type == BlockEntityType.MOB_SPAWNER) return "SPAWNER";
+        if (type == BlockEntityType.VAULT) return "VAULT";
+        if (type == BlockEntityType.DECORATED_POT) return "DECORATED_POT";
+        if (type == BlockEntityType.SIGN) return "OAK_SIGN";
+        if (type == BlockEntityType.HANGING_SIGN) return "OAK_HANGING_SIGN";
+        return "";
+    }
+
+    /**
+     * An immutable data carrier representing a player's spatial coordinates.
+     *
+     * @param x the exact double-precision X coordinate
+     * @param y the exact double-precision Y coordinate
+     * @param z the exact double-precision Z coordinate
+     */
     private record Position(double x, double y, double z) {
     }
 }
