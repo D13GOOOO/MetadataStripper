@@ -26,7 +26,7 @@ import net.minecraft.world.entity.LivingEntity;
  * High-performance spatial entity culling engine designed for Folia and Paper.
  * <p>
  * This engine reduces client-side entity-ESP exposure by suppressing metadata and equipment
- * packets for entities that are outside a strict 32-block tactical radius.
+ * packets for entities that are outside a strict tactical radius.
  * <p>
  * <b>Architectural Notes:</b>
  * <ul>
@@ -52,8 +52,10 @@ public final class EntityCullingEngine {
 
     /**
      * The maximum radius (in blocks) at which an entity's metadata or equipment is sent to the client.
+     * <p>
+     * Dynamically configurable to balance performance and visual culling distance.
      */
-    private static final double TACTICAL_RADIUS = 32.0;
+    private static volatile double tacticalRadius = 32.0;
 
     /**
      * Lock-free map holding the latest sorted array of visible entity IDs for each online player.
@@ -70,6 +72,15 @@ public final class EntityCullingEngine {
      */
     private EntityCullingEngine() {
         throw new UnsupportedOperationException("Utility class cannot be instantiated.");
+    }
+
+    /**
+     * Updates the tactical culling radius dynamically from the plugin configuration.
+     *
+     * @param radius the new radius in blocks
+     */
+    public static void setTacticalRadius(double radius) {
+        tacticalRadius = radius;
     }
 
     /**
@@ -134,7 +145,7 @@ public final class EntityCullingEngine {
 
         BlockEntityFilter.updatePosition(player);
 
-        List<Entity> nearbyEntities = player.getNearbyEntities(TACTICAL_RADIUS, TACTICAL_RADIUS, TACTICAL_RADIUS);
+        List<Entity> nearbyEntities = player.getNearbyEntities(tacticalRadius, tacticalRadius, tacticalRadius);
         int[] visibleIds = new int[nearbyEntities.size()];
 
         for (int i = 0; i < nearbyEntities.size(); i++) {

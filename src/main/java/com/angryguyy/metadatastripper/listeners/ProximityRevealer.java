@@ -50,18 +50,16 @@ public final class ProximityRevealer implements Listener {
     /**
      * The cubic radius (in blocks) around the player to scan and reveal.
      * <p>
-     * Tuned to 5 blocks to encompass the immediate legitimate mining and interaction range
-     * without straining the region thread during continuous movement.
+     * Dynamically configurable to balance performance and legitimate interaction range.
      */
-    private static final int RADIUS = 5;
+    private volatile int radius = 5;
 
     /**
      * The maximum distance (in blocks) the Line-of-Sight raytrace will travel.
      * <p>
-     * Tuned to 45 blocks to cover the visual depth of standard ravines, large cave systems,
-     * and sudden drops where a player needs to see water/blocks to land safely.
+     * Dynamically configurable to cover the visual depth of standard ravines and large cave systems.
      */
-    private static final int RAYTRACE_MAX_DISTANCE = 45;
+    private volatile int raytraceMaxDistance = 45;
 
     /**
      * A highly optimized bit-vector containing all materials that require dynamic revealing.
@@ -83,6 +81,17 @@ public final class ProximityRevealer implements Listener {
      */
     public ProximityRevealer(List<String> configuredBlocks) {
         updateConfiguredBlocks(configuredBlocks);
+    }
+
+    /**
+     * Updates the dynamic proximity and raytrace limits from the configuration.
+     *
+     * @param radius              the new spherical scan radius
+     * @param raytraceMaxDistance the new maximum line-of-sight distance
+     */
+    public void updateSettings(int radius, int raytraceMaxDistance) {
+        this.radius = radius;
+        this.raytraceMaxDistance = raytraceMaxDistance;
     }
 
     /**
@@ -168,7 +177,7 @@ public final class ProximityRevealer implements Listener {
         int lastY = Integer.MAX_VALUE;
         int lastZ = Integer.MAX_VALUE;
 
-        for (double t = 0; t <= RAYTRACE_MAX_DISTANCE; t += 0.5) {
+        for (double t = 0; t <= raytraceMaxDistance; t += 0.5) {
             int bX = (int) Math.floor(originX + dx * t);
             int bY = (int) Math.floor(originY + dy * t);
             int bZ = (int) Math.floor(originZ + dz * t);
@@ -205,9 +214,9 @@ public final class ProximityRevealer implements Listener {
      * @param centerZ center block Z coordinate
      */
     private void scanCube(Player player, World world, int centerX, int centerY, int centerZ) {
-        for (int x = -RADIUS; x <= RADIUS; x++) {
-            for (int y = -RADIUS; y <= RADIUS; y++) {
-                for (int z = -RADIUS; z <= RADIUS; z++) {
+        for (int x = -radius; x <= radius; x++) {
+            for (int y = -radius; y <= radius; y++) {
+                for (int z = -radius; z <= radius; z++) {
                     Block block = world.getBlockAt(centerX + x, centerY + y, centerZ + z);
                     revealIfSensitive(player, block, block.getType(), centerY + y);
                 }
@@ -230,27 +239,27 @@ public final class ProximityRevealer implements Listener {
      */
     private void scanEnteringShell(Player player, World world, ScanPosition previous, int centerX, int centerY, int centerZ) {
         if (previous.x() != centerX) {
-            int x = centerX + (centerX > previous.x() ? RADIUS : -RADIUS);
-            for (int y = -RADIUS; y <= RADIUS; y++) {
-                for (int z = -RADIUS; z <= RADIUS; z++) {
+            int x = centerX + (centerX > previous.x() ? radius : -radius);
+            for (int y = -radius; y <= radius; y++) {
+                for (int z = -radius; z <= radius; z++) {
                     Block block = world.getBlockAt(x, centerY + y, centerZ + z);
                     revealIfSensitive(player, block, block.getType(), centerY + y);
                 }
             }
         }
         if (previous.y() != centerY) {
-            int y = centerY + (centerY > previous.y() ? RADIUS : -RADIUS);
-            for (int x = -RADIUS; x <= RADIUS; x++) {
-                for (int z = -RADIUS; z <= RADIUS; z++) {
+            int y = centerY + (centerY > previous.y() ? radius : -radius);
+            for (int x = -radius; x <= radius; x++) {
+                for (int z = -radius; z <= radius; z++) {
                     Block block = world.getBlockAt(centerX + x, y, centerZ + z);
                     revealIfSensitive(player, block, block.getType(), y);
                 }
             }
         }
         if (previous.z() != centerZ) {
-            int z = centerZ + (centerZ > previous.z() ? RADIUS : -RADIUS);
-            for (int x = -RADIUS; x <= RADIUS; x++) {
-                for (int y = -RADIUS; y <= RADIUS; y++) {
+            int z = centerZ + (centerZ > previous.z() ? radius : -radius);
+            for (int x = -radius; x <= radius; x++) {
+                for (int y = -radius; y <= radius; y++) {
                     Block block = world.getBlockAt(centerX + x, centerY + y, z);
                     revealIfSensitive(player, block, block.getType(), centerY + y);
                 }

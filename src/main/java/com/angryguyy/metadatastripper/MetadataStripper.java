@@ -131,6 +131,7 @@ public final class MetadataStripper extends JavaPlugin {
     private NettyInjector nettyInjector;
     private volatile int baseEngineMode;
     private volatile int alertThreshold;
+    private volatile double degradationTpsThreshold = 18.5;
     private ProximityRevealer proximityRevealer;
 
     /** A reference to the global profiler task, allowing safe cancellation during shutdown or reloads. */
@@ -194,11 +195,19 @@ public final class MetadataStripper extends JavaPlugin {
         PluginManager pluginManager = getServer().getPluginManager();
 
         nettyInjector = new NettyInjector(this);
+        nettyInjector.updateSettings(
+                getConfig().getInt("advanced.aggressive-y-max", 5),
+                getConfig().getInt("advanced.max-pending-region-writes", 32)
+        );
         pluginManager.registerEvents(nettyInjector, this);
         pluginManager.registerEvents(new PlayerQuitListener(), this);
         pluginManager.registerEvents(new BlockUpdateListener(), this);
 
         proximityRevealer = new ProximityRevealer(getConfig().getStringList("sensitive-blocks"));
+        proximityRevealer.updateSettings(
+                getConfig().getInt("advanced.proximity-radius", 5),
+                getConfig().getInt("advanced.raytrace-max-distance", 45)
+        );
         pluginManager.registerEvents(proximityRevealer, this);
 
         PluginCommand msCommand = getCommand("ms");
@@ -258,6 +267,23 @@ public final class MetadataStripper extends JavaPlugin {
     private void loadConfiguration() {
         baseEngineMode = getConfig().getInt("engine-mode", 2);
         alertThreshold = getConfig().getInt("alert-threshold", 5000);
+        degradationTpsThreshold = getConfig().getDouble("advanced.degradation-tps-threshold", 18.5);
+
+        EntityCullingEngine.setTacticalRadius(getConfig().getDouble("advanced.tactical-culling-radius", 32.0));
+
+        if (nettyInjector != null) {
+            nettyInjector.updateSettings(
+                    getConfig().getInt("advanced.aggressive-y-max", 5),
+                    getConfig().getInt("advanced.max-pending-region-writes", 32)
+            );
+        }
+
+        if (proximityRevealer != null) {
+            proximityRevealer.updateSettings(
+                    getConfig().getInt("advanced.proximity-radius", 5),
+                    getConfig().getInt("advanced.raytrace-max-distance", 45)
+            );
+        }
     }
 
     /**
@@ -360,13 +386,13 @@ public final class MetadataStripper extends JavaPlugin {
      * Retrieves the active operational engine mode, applying dynamic TPS-based degradation heuristics.
      * <p>
      * If the server is configured to use the aggressive subterranean fill mode (Mode 2), but the
-     * Server TPS drops below the critical 18.5 threshold, this method instantly steps the engine
+     * Server TPS drops below the critical dynamic threshold, this method instantly steps the engine
      * down to Mode 1 (standard obfuscation) to relieve CPU pressure and prevent chunk timeouts.
      *
      * @return the active integer representing the target obfuscation engine strategy (1 or 2)
      */
     public int getEngineMode() {
-        if (baseEngineMode > 1 && Bukkit.getTPS()[0] < 18.5) {
+        if (baseEngineMode > 1 && Bukkit.getTPS()[0] < degradationTpsThreshold) {
             return 1;
         }
         return baseEngineMode;
@@ -420,7 +446,7 @@ public final class MetadataStripper extends JavaPlugin {
 
     /**
      * Records an event where a regional packet was utterly destroyed (dropped) because a specific
-     * player's outbound channel reached its strict backpressure threshold (usually 32 pending packets).
+     * player's outbound channel reached its strict backpressure threshold.
      * Automatically degrades the {@link EngineHealth}.
      */
     public static void recordBackpressureDrop() {

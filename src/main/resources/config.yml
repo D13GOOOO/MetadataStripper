@@ -195,3 +195,39 @@ sensitive-blocks:
   - SPORE_BLOSSOM
   - GLOW_LICHEN
   - POINTED_DRIPSTONE
+
+
+# ========================================== #
+#      Advanced Tuning (Handle with Care)    #
+# ========================================== #
+advanced:
+  # If the server TPS drops below this threshold, the plugin will dynamically
+  # disable engine-mode 2 (if active) and fall back to mode 1.
+  # This relieves CPU pressure to prevent crashes or server freezes.
+  degradation-tps-threshold: 18.5
+
+  # [Entity Culling]
+  # Maximum tactical radius (in blocks) at which clients receive equipment
+  # and metadata packets for entities (Mobs/Players). Lowering this improves
+  # performance but may cause armor to visually "pop in" late.
+  tactical-culling-radius: 32.0
+
+  # [Netty Injector]
+  # The Y-level threshold below which engine-mode 2 aggressively obliterates
+  # and masks every single block into deepslate to prevent cave ESPs.
+  aggressive-y-max: 5
+
+  # [Netty Injector]
+  # Maximum limit of queued chunks on the I/O thread before the backpressure
+  # system safely drops packets. Prevents server Out-Of-Memory (OOM) crashes.
+  max-pending-region-writes: 32
+
+  # [Proximity Radar]
+  # The spherical radius (in blocks) where obfuscated blocks are seamlessly
+  # revealed in real-time as a player walks or digs.
+  proximity-radius: 5
+
+  # [Proximity Radar]
+  # Maximum distance (in blocks) covered by the occlusion-culled Line-of-Sight
+  # raytrace. Ensures players can see the bottom of ravines for MLG drops.
+  raytrace-max-distance: 45

@@ -61,7 +61,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *               chunk reads without blocking the network thread.</li>
  *       </ul>
  *   </li>
- *   <li><b>Backpressure Management:</b> The pipeline enforces a strict limit ({@code MAX_PENDING_REGION_WRITES}).
+ *   <li><b>Backpressure Management:</b> The pipeline enforces a strict limit ({@code maxPendingRegionWrites}).
  *       If a chunk transformation exceeds 2 seconds or the queue overflows, packets are safely dropped or passed
  *       unmodified to prevent server OOM (Out-Of-Memory) crashes and client disconnections.</li>
  * </ul>
@@ -77,12 +77,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class NettyInjector implements Listener {
 
     private static final String HANDLER_NAME = "MetadataStripper";
-
-    /** The Y-level threshold below which the aggressive Engine Mode 2 obliterates all non-bedrock blocks. */
-    private static final int AGGRESSIVE_Y_MAX = 5;
-
-    /** The maximum number of chunk packets allowed to queue for regional transformation before triggering backpressure drops. */
-    private static final int MAX_PENDING_REGION_WRITES = 32;
 
     private static Unsafe unsafe;
     private static Field chunkDataField;
@@ -139,6 +133,9 @@ public final class NettyInjector implements Listener {
 
     private final MetadataStripper plugin;
 
+    private volatile int aggressiveYMax = 5;
+    private volatile int maxPendingRegionWrites = 32;
+
     /** Lock-free cache of players holding the bypass permission, avoiding slow LuckPerms lookups on the Netty thread. */
     private final Map<UUID, Boolean> bypassPlayers = new ConcurrentHashMap<>();
 
@@ -162,6 +159,17 @@ public final class NettyInjector implements Listener {
             plugin.getLogger().log(java.util.logging.Level.WARNING,
                     "Netty packet interception is partially unavailable", initializationFailure);
         }
+    }
+
+    /**
+     * Updates advanced settings from configuration.
+     *
+     * @param aggressiveYMax           the Y-level threshold for aggressive Mode 2 fill
+     * @param maxPendingRegionWrites   the maximum queue limit before backpressure drops occur
+     */
+    public void updateSettings(int aggressiveYMax, int maxPendingRegionWrites) {
+        this.aggressiveYMax = aggressiveYMax;
+        this.maxPendingRegionWrites = maxPendingRegionWrites;
     }
 
     /**
@@ -234,7 +242,7 @@ public final class NettyInjector implements Listener {
                     }
 
                     if (isRegionPacket(msg) && !Boolean.TRUE.equals(bypassPlayers.get(playerUuid))) {
-                        if (pendingRegionWriteCount >= MAX_PENDING_REGION_WRITES) {
+                        if (pendingRegionWriteCount >= maxPendingRegionWrites) {
                             MetadataStripper.recordBackpressureDrop();
                             promise.setSuccess();
                             return;
@@ -452,7 +460,7 @@ public final class NettyInjector implements Listener {
 
                     int sectionY = (minBuildHeight >> 4) + i;
                     int globalSectionY = sectionY << 4;
-                    boolean isUnderground = globalSectionY < AGGRESSIVE_Y_MAX;
+                    boolean isUnderground = globalSectionY < aggressiveYMax;
 
                     boolean sectionModified = false;
 
