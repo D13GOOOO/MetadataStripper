@@ -159,7 +159,6 @@ sensitive-blocks:
   - POWERED_RAIL
   - ACTIVATOR_RAIL
   - DETECTOR_RAIL
-  - CHAIN
 
   # Strongholds & Classic Dungeons
   - MOSSY_COBBLESTONE

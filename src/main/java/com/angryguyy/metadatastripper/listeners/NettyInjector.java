@@ -133,7 +133,6 @@ public final class NettyInjector implements Listener {
 
     private final MetadataStripper plugin;
 
-    private volatile int aggressiveYMax = 5;
     private volatile int maxPendingRegionWrites = 32;
 
     /** Lock-free cache of players holding the bypass permission, avoiding slow LuckPerms lookups on the Netty thread. */
@@ -142,7 +141,6 @@ public final class NettyInjector implements Listener {
     /** Lock-free cache mapping player UUIDs to their NMS Entity ID to rapidly filter self-metadata packets. */
     private final Map<UUID, Integer> playerEntityIds = new ConcurrentHashMap<>();
 
-    private final AtomicLong lastFailureLogNanos = new AtomicLong();
     private volatile boolean shuttingDown;
 
     /**
@@ -164,11 +162,10 @@ public final class NettyInjector implements Listener {
     /**
      * Updates advanced settings from configuration.
      *
-     * @param aggressiveYMax           the Y-level threshold for aggressive Mode 2 fill
+     * @param aggressiveYMax           the Y-level threshold for aggressive Mode 2 fill (No longer strictly applied to chunk replacement)
      * @param maxPendingRegionWrites   the maximum queue limit before backpressure drops occur
      */
     public void updateSettings(int aggressiveYMax, int maxPendingRegionWrites) {
-        this.aggressiveYMax = aggressiveYMax;
         this.maxPendingRegionWrites = maxPendingRegionWrites;
     }
 
@@ -244,27 +241,68 @@ public final class NettyInjector implements Listener {
                         return;
                     }
 
-                    if (isRegionPacket(msg) && !Boolean.TRUE.equals(bypassPlayers.get(playerUuid))) {
+                    boolean bypass = Boolean.TRUE.equals(bypassPlayers.get(playerUuid));
+
+                    if (isRegionPacket(msg) && !bypass) {
                         if (pendingRegionWriteCount >= maxPendingRegionWrites) {
                             MetadataStripper.recordBackpressureDrop();
                             promise.setSuccess();
                             return;
                         }
 
+                        pendingRegionWriteCount++;
                         CompletableFuture<Void> previous = pendingRegionWrites;
                         CompletableFuture<Void> current = new CompletableFuture<>();
-                        pendingRegionWriteCount++;
                         pendingRegionWrites = current;
 
-                        previous.whenComplete((ignored, failure) -> ctx.executor().execute(() ->
-                                writeRegionPacketAsync(ctx, player, msg, promise, current,
-                                        () -> pendingRegionWriteCount--)));
+                        CompletableFuture<Object> transformed = RegionSchedulerAdapter.callForEntityAsync(
+                                plugin, player, () -> handleRegionPacket(player, msg), 2L, TimeUnit.SECONDS);
+
+                        previous.whenComplete((ignored, prevFailure) -> {
+                            transformed.whenComplete((packet, throwable) -> {
+                                ctx.executor().execute(() -> {
+                                    pendingRegionWriteCount--;
+
+                                    if (shuttingDown) {
+                                        promise.setSuccess();
+                                        current.complete(null);
+                                        return;
+                                    }
+
+                                    if (throwable != null) {
+                                        boolean timeout = throwable instanceof java.util.concurrent.TimeoutException
+                                                || throwable.getCause() instanceof java.util.concurrent.TimeoutException;
+                                        MetadataStripper.recordFallback(timeout);
+                                        promise.setSuccess();
+                                    } else if (packet != null) {
+                                        if (msg instanceof ClientboundLevelChunkWithLightPacket) {
+                                            MetadataStripper.recordTransformedChunk();
+                                        }
+                                        ctx.write(packet, promise);
+                                    } else {
+                                        promise.setSuccess();
+                                    }
+
+                                    current.complete(null);
+                                });
+                            });
+                        });
                         return;
                     }
 
                     if (!pendingRegionWrites.isDone()) {
-                        pendingRegionWrites.whenComplete((ignored, failure) -> ctx.executor().execute(() ->
-                                writeNonRegionPacket(ctx, playerUuid, msg, promise)));
+                        CompletableFuture<Void> previous = pendingRegionWrites;
+                        CompletableFuture<Void> current = new CompletableFuture<>();
+                        pendingRegionWrites = current;
+
+                        previous.whenComplete((ignored, failure) -> ctx.executor().execute(() -> {
+                            if (shuttingDown) {
+                                promise.setSuccess();
+                            } else {
+                                writeNonRegionPacket(ctx, playerUuid, msg, promise);
+                            }
+                            current.complete(null);
+                        }));
                         return;
                     }
 
@@ -329,74 +367,6 @@ public final class NettyInjector implements Listener {
     }
 
     /**
-     * Dispatches a heavy packet to the Folia Region Scheduler for asynchronous processing.
-     * <p>
-     * Enforces a strict 2-second bounding timeout to prevent deadlocks. If the region thread is overloaded,
-     * the packet is safely dropped or passed untouched, triggering a {@code DEGRADED} diagnostic state.
-     *
-     * @param ctx            the Netty channel context
-     * @param player         the target player
-     * @param originalPacket the raw outbound packet
-     * @param promise        the Netty promise to fulfill
-     * @param completion     the completable future controlling the ordered queue
-     * @param releaseSlot    the callback to decrement the backpressure queue count
-     */
-    @SuppressWarnings("resource")
-    private void writeRegionPacketAsync(ChannelHandlerContext ctx, Player player,
-                                        Object originalPacket, ChannelPromise promise,
-                                        CompletableFuture<Void> completion, Runnable releaseSlot) {
-        AtomicBoolean completed = new AtomicBoolean();
-
-        CompletableFuture<Object> transformed = RegionSchedulerAdapter.callForEntityAsync(
-                plugin, player, () -> handleRegionPacket(player, originalPacket), 2L, TimeUnit.SECONDS);
-
-        transformed.whenComplete((packet, throwable) -> ctx.executor().execute(() -> {
-            if (!completed.compareAndSet(false, true)) {
-                return;
-            }
-            releaseSlot.run();
-
-            if (shuttingDown) {
-                promise.setSuccess();
-                completion.complete(null);
-                return;
-            }
-
-            if (throwable != null) {
-                boolean timeout = throwable instanceof java.util.concurrent.TimeoutException
-                        || throwable.getCause() instanceof java.util.concurrent.TimeoutException;
-                MetadataStripper.recordFallback(timeout);
-
-                long now = System.nanoTime();
-                long previous = lastFailureLogNanos.get();
-                if (now - previous >= TimeUnit.SECONDS.toNanos(10)
-                        && lastFailureLogNanos.compareAndSet(previous, now)) {
-                    plugin.getLogger().log(java.util.logging.Level.WARNING,
-                            timeout ? "Timed out transforming outbound packet; dropping it safely"
-                                    : "Failed transforming outbound packet; dropping it safely", throwable);
-                }
-
-                promise.setSuccess();
-                completion.complete(null);
-                return;
-            }
-
-            if (packet == null) {
-                promise.setSuccess();
-                completion.complete(null);
-                return;
-            }
-
-            if (originalPacket instanceof ClientboundLevelChunkWithLightPacket) {
-                MetadataStripper.recordTransformedChunk();
-            }
-
-            ctx.write(packet, promise);
-            completion.complete(null);
-        }));
-    }
-
-    /**
      * Core region-thread mutation engine for Chunk and Block Update packets.
      * <p>
      * <b>Chunk Cloning Mechanics:</b> Because NMS Chunks are cached and shared across multiple players,
@@ -416,10 +386,13 @@ public final class NettyInjector implements Listener {
             Level level = ((CraftPlayer) player).getHandle().level();
             BlockState original = packet.getBlockState();
             BlockState sanitized = BlockStateCache.sanitize(original);
+            int engineMode = plugin.getEngineMode();
+            int packetY = packet.getPos().getY();
 
-            if (original.getBlock() == Blocks.BEDROCK && packet.getPos().getY() > player.getWorld().getMinHeight()) {
-                sanitized = ObfuscationPalette.getObfuscatedBlock(plugin.getEngineMode(), packet.getPos(), getEnvironmentFast(level));
+            if (original.getBlock() == Blocks.BEDROCK && packetY > player.getWorld().getMinHeight()) {
+                sanitized = ObfuscationPalette.getObfuscatedBlock(engineMode, packet.getPos(), getEnvironmentFast(level));
             }
+
             if (original != sanitized) {
                 return new ClientboundBlockUpdatePacket(packet.getPos(), sanitized);
             }
@@ -442,7 +415,6 @@ public final class NettyInjector implements Listener {
 
             Environment env = getEnvironmentFast(serverLevel);
             int engineMode = plugin.getEngineMode();
-            boolean isAggressiveMode = engineMode >= 2;
 
             BlockState stone = ObfuscationPalette.getObfuscatedBlock(engineMode, new BlockPos(0, 1, 0), env);
             BlockState deepslate = ObfuscationPalette.getObfuscatedBlock(engineMode, new BlockPos(0, -1, 0), env);
@@ -464,30 +436,25 @@ public final class NettyInjector implements Listener {
 
                     int sectionY = (minBuildHeight >> 4) + i;
                     int globalSectionY = sectionY << 4;
-                    boolean isUnderground = globalSectionY < aggressiveYMax;
 
                     boolean sectionModified = false;
 
-                    if (isUnderground && isAggressiveMode) {
-                        sectionModified = true;
-                    } else {
-                        for (int y = 0; y < 16; y++) {
-                            int actualY = globalSectionY + y;
-                            boolean checkLiquid = actualY < 55;
+                    for (int y = 0; y < 16; y++) {
+                        int actualY = globalSectionY + y;
+                        boolean checkLiquid = actualY < 55;
 
-                            for (int x = 0; x < 16; x++) {
-                                for (int z = 0; z < 16; z++) {
-                                    BlockState state = section.getBlockState(x, y, z);
-                                    int id = Block.getId(state);
+                        for (int x = 0; x < 16; x++) {
+                            for (int z = 0; z < 16; z++) {
+                                BlockState state = section.getBlockState(x, y, z);
+                                int id = Block.getId(state);
 
-                                    boolean isSensitive = id >= 0 && id < sensitiveStates.length && sensitiveStates[id];
-                                    boolean isUndergroundLiquid = checkLiquid && !state.getFluidState().isEmpty();
+                                boolean isSensitive = id >= 0 && id < sensitiveStates.length && sensitiveStates[id];
+                                boolean isUndergroundLiquid = checkLiquid && !state.getFluidState().isEmpty();
 
-                                    if (isSensitive || isUndergroundLiquid) {
-                                        sectionModified = true;
-                                    } else if (state.getBlock() == Blocks.BEDROCK && actualY > minBuildHeight) {
-                                        sectionModified = true;
-                                    }
+                                if (isSensitive || isUndergroundLiquid) {
+                                    sectionModified = true;
+                                } else if (state.getBlock() == Blocks.BEDROCK && actualY > minBuildHeight) {
+                                    sectionModified = true;
                                 }
                             }
                         }
@@ -509,33 +476,21 @@ public final class NettyInjector implements Listener {
                         f.set(fakeSection, val);
                     }
 
-                    if (isUnderground && isAggressiveMode) {
-                        for (int y = 0; y < 16; y++) {
-                            for (int x = 0; x < 16; x++) {
-                                for (int z = 0; z < 16; z++) {
-                                    BlockState originalState = section.getBlockState(x, y, z);
-                                    fakeSection.setBlockState(x, y, z,
-                                            originalState.getBlock() == Blocks.BEDROCK ? originalState : deepslate);
-                                }
-                            }
-                        }
-                    } else {
-                        for (int y = 0; y < 16; y++) {
-                            int actualY = globalSectionY + y;
-                            BlockState replacement = actualY < 0 ? deepslate : stone;
-                            boolean checkLiquid = actualY < 55;
+                    for (int y = 0; y < 16; y++) {
+                        int actualY = globalSectionY + y;
+                        BlockState replacement = actualY < 0 ? deepslate : stone;
+                        boolean checkLiquid = actualY < 55;
 
-                            for (int x = 0; x < 16; x++) {
-                                for (int z = 0; z < 16; z++) {
-                                    BlockState state = section.getBlockState(x, y, z);
-                                    int id = Block.getId(state);
-                                    boolean isSensitive = id >= 0 && id < sensitiveStates.length && sensitiveStates[id];
-                                    boolean isUndergroundLiquid = checkLiquid && !state.getFluidState().isEmpty();
+                        for (int x = 0; x < 16; x++) {
+                            for (int z = 0; z < 16; z++) {
+                                BlockState state = section.getBlockState(x, y, z);
+                                int id = Block.getId(state);
+                                boolean isSensitive = id >= 0 && id < sensitiveStates.length && sensitiveStates[id];
+                                boolean isUndergroundLiquid = checkLiquid && !state.getFluidState().isEmpty();
 
-                                    if (isSensitive || isUndergroundLiquid ||
-                                            (state.getBlock() == Blocks.BEDROCK && actualY > minBuildHeight)) {
-                                        fakeSection.setBlockState(x, y, z, replacement);
-                                    }
+                                if (isSensitive || isUndergroundLiquid ||
+                                        (state.getBlock() == Blocks.BEDROCK && actualY > minBuildHeight)) {
+                                    fakeSection.setBlockState(x, y, z, replacement);
                                 }
                             }
                         }

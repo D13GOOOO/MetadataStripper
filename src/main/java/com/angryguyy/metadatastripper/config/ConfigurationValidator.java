@@ -20,9 +20,6 @@ import org.bukkit.configuration.file.FileConfiguration;
  *   <li><b>Execution Context:</b> Designed to run during plugin initialization and administrative command execution
  *       (typically on the main server thread in Paper or the global region thread in Folia). It is <i>not</i>
  *       invoked during the outbound packet path.</li>
- *   <li><b>Performance Implications:</b> Enforces a soft limit of 128 materials for {@code sensitive-blocks}.
- *       Exceeding this triggers a warning because larger sets linearly increase the O(N) cost of scanning
- *       chunk sections in the player's region scheduler, potentially leading to packet timeouts or backpressure drops.</li>
  *   <li><b>Thread Safety:</b> The validation logic is stateless, and the resulting {@link ValidationResult}
  *       is deeply immutable and completely thread-safe to read across different schedulers.</li>
  * </ul>
@@ -40,15 +37,6 @@ public final class ConfigurationValidator {
 
     /**
      * Validates operational settings and configured Bukkit materials against engine constraints.
-     * <p>
-     * <b>Validation Rules:</b>
-     * <ul>
-     *   <li>{@code engine-mode}: Must be 1 (standard) or 2 (aggressive subterranean fill).</li>
-     *   <li>{@code alert-threshold}: Must be strictly greater than 0.</li>
-     *   <li>{@code client-name} & {@code license-key}: Must be present and non-blank (acts as a local installation gate).</li>
-     *   <li>{@code sensitive-blocks}: Must not be empty, and all entries must successfully map to valid Bukkit {@link Material} names.</li>
-     *   <li>{@code advanced}: All tuning parameters must be within their safe operational limits.</li>
-     * </ul>
      *
      * @param configuration the raw {@link FileConfiguration} to inspect (typically loaded from {@code config.yml})
      * @return an immutable {@link ValidationResult} containing discrete lists of blocking errors and non-blocking warnings
@@ -66,16 +54,6 @@ public final class ConfigurationValidator {
         int alertThreshold = configuration.getInt("alert-threshold", -1);
         if (alertThreshold < 1) {
             errors.add("alert-threshold must be greater than zero");
-        }
-
-        String clientName = configuration.getString("client-name", "");
-        if (clientName.isBlank()) {
-            errors.add("client-name is required");
-        }
-
-        String licenseKey = configuration.getString("license-key", "");
-        if (licenseKey.isBlank()) {
-            errors.add("license-key is required");
         }
 
         double degradationTps = configuration.getDouble("advanced.degradation-tps-threshold", -1.0);
@@ -108,19 +86,15 @@ public final class ConfigurationValidator {
             errors.add("sensitive-blocks must contain at least one material");
         }
 
-        int invalidMaterials = 0;
+        List<String> invalidMaterials = new ArrayList<>();
         for (String configuredMaterial : configuredMaterials) {
             if (configuredMaterial == null
                     || Material.matchMaterial(configuredMaterial.toUpperCase(Locale.ROOT)) == null) {
-                invalidMaterials++;
+                invalidMaterials.add(configuredMaterial);
             }
         }
-        if (invalidMaterials > 0) {
-            errors.add(invalidMaterials + " sensitive-blocks entries are not valid Bukkit materials");
-        }
-
-        if (configuredMaterials.size() > 128) {
-            warnings.add("sensitive-blocks contains more than 128 materials and may increase chunk transformation cost");
+        if (!invalidMaterials.isEmpty()) {
+            errors.add("Invalid Bukkit materials in sensitive-blocks: " + String.join(", ", invalidMaterials));
         }
 
         return new ValidationResult(errors, warnings);

@@ -45,7 +45,7 @@ public final class RegionSchedulerAdapter {
      */
     public static void executeForEntity(Plugin plugin, Entity entity, Runnable task) {
         if (IS_FOLIA) {
-            entity.getScheduler().execute(plugin, task, null, 1L);
+            entity.getScheduler().run(plugin, scheduledTask -> task.run(), null);
         } else {
             Bukkit.getScheduler().runTask(plugin, task);
         }
@@ -63,7 +63,7 @@ public final class RegionSchedulerAdapter {
      * @return future completed by the owning scheduler
      */
     public static <T> CompletableFuture<T> callForEntityAsync(Plugin plugin, Entity entity, Supplier<T> task,
-                                                               long timeout, TimeUnit unit) {
+                                                              long timeout, TimeUnit unit) {
         CompletableFuture<T> result = new CompletableFuture<>();
         try {
             executeForEntity(plugin, entity, () -> {
@@ -86,7 +86,7 @@ public final class RegionSchedulerAdapter {
      * @param task task that may access global Bukkit state
      * @param initialDelayTicks initial delay in server ticks
      * @param periodTicks repetition period in server ticks
-    * @return cancellation action for the scheduled task
+     * @return cancellation action for the scheduled task
      */
     public static Runnable scheduleGlobalRepeating(Plugin plugin, Runnable task, long initialDelayTicks, long periodTicks) {
         if (IS_FOLIA) {
