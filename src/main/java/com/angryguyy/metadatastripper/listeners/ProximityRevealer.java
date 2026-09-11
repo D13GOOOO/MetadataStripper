@@ -35,73 +35,55 @@ import org.bukkit.event.player.PlayerMoveEvent;
  *   <li><b>Thread Safety:</b> Designed to handle concurrent administrative reloads. The material lookup
  *       set is marked as {@code volatile} and is strictly immutable, ensuring safe reads across regional threads.</li>
  * </ul>
- * <p>
- * <b>Algorithmic Complexity & Optimizations:</b>
- * <ul>
- *   <li><b>Full Scan:</b> O(11³) execution. Reserved exclusively for first entry, teleports, and world changes.</li>
- *   <li><b>Shell Scan:</b> Drastically reduced complexity for standard one-block movement. It computes and scans
- *       only the newly entered dimensional planes (the "shell" of the radius) rather than the entire volume.</li>
- *   <li><b>Raytrace:</b> Occlusion-culled. The ray stops immediately upon hitting a solid block, preventing
- *       computation waste and maintaining strict anti-xray integrity behind walls. Evaluated only on camera transitions (> 3 degrees).</li>
- * </ul>
  */
 public final class ProximityRevealer implements Listener {
 
-    /**
-     * The cubic radius (in blocks) around the player to scan and reveal.
-     * <p>
-     * Dynamically configurable to balance performance and legitimate interaction range.
-     */
+    /** The spherical scan radius (in blocks) around the player to reveal blocks. */
     private volatile int radius = 5;
 
-    /**
-     * The maximum distance (in blocks) the Line-of-Sight raytrace will travel.
-     * <p>
-     * Dynamically configurable to cover the visual depth of standard ravines and large cave systems.
-     */
+    /** The maximum distance (in blocks) the Line-of-Sight raytrace will travel. */
     private volatile int raytraceMaxDistance = 45;
 
-    /**
-     * A highly optimized bit-vector containing all materials that require dynamic revealing.
-     * <p>
-     * <b>Thread Safety:</b> Marked as {@code volatile} to guarantee visibility across multiple Region Schedulers
-     * when the {@code /ms reload} command atomically replaces this set from the global thread.
-     */
+    /** The operational engine mode determining obfuscation intensity. */
+    private volatile int engineMode = 2;
+
+    /** The Y-level threshold below which solid fill cave obfuscation is active. */
+    private volatile int aggressiveYMax = 5;
+
+    /** A volatile, immutable set of sensitive materials requiring proximity reveals. */
     private volatile Set<Material> sensitiveMaterials;
 
-    /**
-     * A lock-free map storing the last known block coordinates of every online player to calculate delta movements.
-     */
+    /** Lock-free cache tracking the last known block coordinates of online players for shell scanning delta calculations. */
     private final Map<UUID, ScanPosition> scanPositions = new ConcurrentHashMap<>();
 
     /**
-     * Constructs the radar module and initializes the high-speed material lookup set.
+     * Constructs the proximity revealer and initializes the immutable material set.
      *
-     * @param configuredBlocks a list of sensitive material names defined in the plugin configuration
+     * @param configuredBlocks a list of sensitive block material names from configuration
      */
     public ProximityRevealer(List<String> configuredBlocks) {
         updateConfiguredBlocks(configuredBlocks);
     }
 
     /**
-     * Updates the dynamic proximity and raytrace limits from the configuration.
+     * Dynamically updates the proximity radius, raytrace distance, engine mode, and subterranean fill threshold.
      *
      * @param radius              the new spherical scan radius
      * @param raytraceMaxDistance the new maximum line-of-sight distance
+     * @param engineMode          the current engine mode (e.g., 1 or 2)
+     * @param aggressiveYMax      the vertical Y-level threshold for aggressive fill
      */
-    public void updateSettings(int radius, int raytraceMaxDistance) {
+    public void updateSettings(int radius, int raytraceMaxDistance, int engineMode, int aggressiveYMax) {
         this.radius = radius;
         this.raytraceMaxDistance = raytraceMaxDistance;
+        this.engineMode = engineMode;
+        this.aggressiveYMax = aggressiveYMax;
     }
 
     /**
-     * Atomically replaces the material lookup table used by proximity reveals.
-     * <p>
-     * This method safely converts the string list into an immutable, highly optimized {@link EnumSet}.
-     * Invalid materials are silently ignored, as validation is expected to happen upstream via
-     * {@link com.angryguyy.metadatastripper.config.ConfigurationValidator}.
+     * Atomically rebuilds and replaces the internal thread-safe set of sensitive materials.
      *
-     * @param configuredBlocks material names from the current active plugin configuration
+     * @param configuredBlocks material names parsed from configuration
      */
     public void updateConfiguredBlocks(List<String> configuredBlocks) {
         Set<Material> updatedMaterials = EnumSet.noneOf(Material.class);
@@ -114,12 +96,12 @@ public final class ProximityRevealer implements Listener {
     }
 
     /**
-     * Intercepts player movement to evaluate and dynamically reveal nearby obfuscated blocks.
+     * Intercepts player movement to evaluate and dynamically reveal nearby obfuscated blocks or caves.
      * <p>
-     * Operates at the {@link EventPriority#MONITOR} priority to ensure movement wasn't cancelled
-     * by anti-cheats or territory protection plugins. Bypass permission holders skip this logic entirely.
+     * Evaluates block delta changes and camera orientation shifts to trigger either full volume cube scans,
+     * optimized shell scans, or occlusion-culled LoS raytraces.
      *
-     * @param event the native {@link PlayerMoveEvent} dispatched by the server
+     * @param event the native {@link PlayerMoveEvent}
      */
     @SuppressWarnings("unused")
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -186,6 +168,12 @@ public final class ProximityRevealer implements Listener {
                 continue;
             }
 
+            // Strictly halt the raytrace upon entering the aggressive underground zone.
+            // Prevents the ray from acting as an X-Ray through the artificial Deepslate walls.
+            if (engineMode >= 2 && bY < aggressiveYMax) {
+                break;
+            }
+
             lastX = bX;
             lastY = bY;
             lastZ = bZ;
@@ -202,13 +190,11 @@ public final class ProximityRevealer implements Listener {
     }
 
     /**
-     * Scans the complete cubic reveal volume.
-     * <p>
-     * Due to its O(R³) complexity, this is strictly reserved for high-delta movements
-     * such as teleports, world changes, respawns, or initial joins.
+     * Scans the complete cubic reveal volume around the player's position.
+     * Reserved for teleports, world changes, or large spatial jumps.
      *
-     * @param player  recipient of the targeted block updates
-     * @param world   the world containing the scan volume
+     * @param player  the recipient player
+     * @param world   the active world instance
      * @param centerX center block X coordinate
      * @param centerY center block Y coordinate
      * @param centerZ center block Z coordinate
@@ -225,17 +211,15 @@ public final class ProximityRevealer implements Listener {
     }
 
     /**
-     * Dynamically scans only the planes (shell) that newly entered the reveal volume during a one-block move.
-     * <p>
-     * This mathematical optimization dramatically reduces the number of block lookups required
-     * during normal walking/sprinting, vastly lowering the CPU footprint on the Region Scheduler.
+     * Scans only the newly entered planes (shell) during a standard single-block movement delta.
+     * Dramatically reduces CPU overhead compared to full cube scans.
      *
-     * @param player  recipient of the targeted block updates
-     * @param world   the world containing the scan volume
-     * @param previous the previous scan center, used to calculate the directional delta
-     * @param centerX current center block X coordinate
-     * @param centerY current center block Y coordinate
-     * @param centerZ current center block Z coordinate
+     * @param player   the recipient player
+     * @param world    the active world instance
+     * @param previous the player's previous quantized position
+     * @param centerX  current center block X coordinate
+     * @param centerY  current center block Y coordinate
+     * @param centerZ  current center block Z coordinate
      */
     private void scanEnteringShell(Player player, World world, ScanPosition previous, int centerX, int centerY, int centerZ) {
         if (previous.x() != centerX) {
@@ -269,33 +253,36 @@ public final class ProximityRevealer implements Listener {
 
     /**
      * Evaluates a block and dispatches a single-block update packet directly to the client
-     * if the block matches the sensitive material profile.
-     * <p>
-     * Includes dedicated logic for underground liquids (Y < 55) to support deep-cave exploration
-     * and MLG mechanics, which are aggressively obfuscated by the engine's Engine Mode 2.
+     * if the block needs to be organically revealed from the obfuscated state.
      *
      * @param player recipient of the block update
      * @param block  the physical block being evaluated
      * @param type   the natively cached material of the block
-     * @param y      the vertical Y coordinate of the block (used for depth heuristics)
+     * @param y      the vertical Y coordinate of the block
      */
     private void revealIfSensitive(Player player, Block block, Material type, int y) {
-        boolean isLiquid = type == Material.WATER || type == Material.LAVA;
+        // If the player is exploring deep underground in aggressive mode, the client renders a solid block.
+        // We must push block updates for Air, Stone, Dirt, etc., so they don't get stuck in fake walls.
+        if (engineMode >= 2 && y < aggressiveYMax) {
+            Material expectedFake = (y < 0) ? Material.DEEPSLATE : Material.STONE;
+            if (type != expectedFake) {
+                player.sendBlockChange(block.getLocation(), block.getBlockData());
+            }
+            return;
+        }
 
+        boolean isLiquid = type == Material.WATER || type == Material.LAVA;
         if (sensitiveMaterials.contains(type) || (isLiquid && y < 55)) {
             player.sendBlockChange(block.getLocation(), block.getBlockData());
         }
     }
 
     /**
-     * Computes the shortest absolute angular distance between two yaw values.
-     * <p>
-     * Used to filter out micro-jitters in player aiming and only trigger the raytrace
-     * logic for intentional, significant camera movements.
+     * Computes the absolute shortest angular distance between two yaw orientations.
      *
-     * @param first  the initial yaw value in degrees
-     * @param second the subsequent yaw value in degrees
-     * @return the normalized angular distance between 0.0 and 180.0 degrees
+     * @param first  initial yaw angle in degrees
+     * @param second subsequent yaw angle in degrees
+     * @return normalized angular difference between 0.0 and 180.0 degrees
      */
     private float angleDifference(float first, float second) {
         float difference = Math.abs(first - second) % 360.0f;
@@ -303,10 +290,7 @@ public final class ProximityRevealer implements Listener {
     }
 
     /**
-     * Safely evicts cached movement states from memory when a player disconnects.
-     * <p>
-     * Prevents memory leaks by ensuring the {@link ConcurrentHashMap} does not hold
-     * orphaned references to UUIDs or Worlds.
+     * Purges movement records when a player disconnects to prevent memory leaks.
      *
      * @param event the native player quit event
      */
@@ -317,26 +301,21 @@ public final class ProximityRevealer implements Listener {
     }
 
     /**
-     * Safely performs garbage collection by sweeping orphaned UUID profiles.
-     * <p>
-     * Designed to be called by a low-priority global scheduler task to ensure
-     * disconnected players or fake NPC entities do not cause memory leaks
-     * if they bypass the standard PlayerQuitEvent.
+     * Sweeps orphaned player positions for offline or invalid UUIDs.
      *
-     * @param activeUuids a set of currently online and valid player UUIDs
+     * @param activeUuids a set of currently online player UUIDs
      */
     public void cleanOrphans(Set<UUID> activeUuids) {
         scanPositions.keySet().removeIf(uuid -> !activeUuids.contains(uuid));
     }
 
     /**
-     * An immutable data carrier representing a player's last known quantized block position.
-     * Used exclusively to calculate delta movements for optimized shell scanning.
+     * Immutable carrier representing a player's last quantized grid location.
      *
-     * @param world the Bukkit World reference
-     * @param x     the quantized X coordinate
-     * @param y     the quantized Y coordinate
-     * @param z     the quantized Z coordinate
+     * @param world the Bukkit world reference
+     * @param x     the quantized X block coordinate
+     * @param y     the quantized Y block coordinate
+     * @param z     the quantized Z block coordinate
      */
     private record ScanPosition(World world, int x, int y, int z) {
     }

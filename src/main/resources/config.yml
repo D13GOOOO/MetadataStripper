@@ -9,8 +9,8 @@ client-name: "YOUR_BUILDBYBIT_USERNAME"
 license-key: "ENTER_YOUR_LICENSE_KEY"
 
 # Operational Engine Mode:
-# 2 = Full Aggressive (Ores + Containers + Cave Filling + Anti-Seed Cracker)
-# 1 = Lightweight (Ores + Containers + Anti-Seed Cracker, skips heavy cave filling)
+# 2 = Full Aggressive (Ores + Containers + Solid Fill for Caves + Anti-Seed Cracker)
+# 1 = Lightweight (Ores + Containers + Anti-Seed Cracker, skips the heavy Solid Fill)
 engine-mode: 2
 
 # Profiler Alert Threshold (Stash Finder Detection):
@@ -159,6 +159,9 @@ sensitive-blocks:
   - POWERED_RAIL
   - ACTIVATOR_RAIL
   - DETECTOR_RAIL
+  - OAK_FENCE
+  - OAK_PLANKS
+  - IRON_CHAIN
 
   # Strongholds & Classic Dungeons
   - MOSSY_COBBLESTONE
@@ -212,21 +215,24 @@ advanced:
   tactical-culling-radius: 32.0
 
   # [Netty Injector]
-  # The Y-level threshold below which engine-mode 2 aggressively obliterates
-  # and masks every single block into deepslate to prevent cave ESPs.
+  # The Y-level threshold below which engine-mode 2 applies the "Solid Fill" strategy.
+  # Entire chunk sections are transformed into solid Deepslate/Stone to completely blind
+  # Cave ESPs. The Proximity Radar will dynamically carve out the real caves.
   aggressive-y-max: 5
 
   # [Netty Injector]
-  # Maximum limit of queued chunks on the I/O thread before the backpressure
-  # system safely drops packets. Prevents server Out-Of-Memory (OOM) crashes.
-  max-pending-region-writes: 32
+  # Maximum limit of queued chunks on the I/O thread. Increased to 2048 to handle
+  # massive chunk sends during fast Freecam flight or teleports. If this limit is
+  # exceeded, packets are safely destroyed (client sees missing chunks) to prevent X-Ray leaks.
+  max-pending-region-writes: 2048
 
   # [Proximity Radar]
-  # The spherical radius (in blocks) where obfuscated blocks are seamlessly
-  # revealed in real-time as a player walks or digs.
+  # The spherical radius (in blocks) where obfuscated blocks (and real air/caves in Mode 2)
+  # are seamlessly revealed in real-time as a player walks or digs.
   proximity-radius: 5
 
   # [Proximity Radar]
   # Maximum distance (in blocks) covered by the occlusion-culled Line-of-Sight
   # raytrace. Ensures players can see the bottom of ravines for MLG drops.
+  # NOTE: The raytrace halts at the aggressive-y-max boundary to prevent cave ESPs.
   raytrace-max-distance: 45

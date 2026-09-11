@@ -24,6 +24,7 @@ import com.angryguyy.metadatastripper.util.RegionSchedulerAdapter;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 
@@ -206,7 +207,9 @@ public final class MetadataStripper extends JavaPlugin {
         proximityRevealer = new ProximityRevealer(getConfig().getStringList("sensitive-blocks"));
         proximityRevealer.updateSettings(
                 getConfig().getInt("advanced.proximity-radius", 5),
-                getConfig().getInt("advanced.raytrace-max-distance", 45)
+                getConfig().getInt("advanced.raytrace-max-distance", 45),
+                getConfig().getInt("engine-mode", 2),
+                getConfig().getInt("advanced.aggressive-y-max", 5)
         );
         pluginManager.registerEvents(proximityRevealer, this);
 
@@ -281,7 +284,9 @@ public final class MetadataStripper extends JavaPlugin {
         if (proximityRevealer != null) {
             proximityRevealer.updateSettings(
                     getConfig().getInt("advanced.proximity-radius", 5),
-                    getConfig().getInt("advanced.raytrace-max-distance", 45)
+                    getConfig().getInt("advanced.raytrace-max-distance", 45),
+                    baseEngineMode,
+                    getConfig().getInt("advanced.aggressive-y-max", 5)
             );
         }
     }
